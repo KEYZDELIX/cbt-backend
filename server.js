@@ -71,22 +71,23 @@ app.post('/login', async (req, res) => {
       password: password 
     });
 
-    if (!user) {
-      return res.status(401).json({ message: "Invalid Reg Number or Password" });
-    }
+    // Inside app.post('/login'...)
+let exam = await Exam.findOne({ userId: user._id, status: 'active' });
 
-    // Check for an existing active exam or create a new one
-    let exam = await Exam.findOne({ userId: user._id, status: 'active' });
-    
-    if (!exam) {
-      exam = new Exam({ 
-        userId: user._id,
-        subjectCombination: user.subjectCombination,
-        status: 'active',
-        startTime: new Date()
-      });
-      await exam.save();
-    }
+if (!exam) {
+  // Ensure user.subjectCombination actually has data!
+  if (!user.subjectCombination || user.subjectCombination.length === 0) {
+      return res.status(400).json({ message: "No subjects assigned to this user. Contact Admin." });
+  }
+
+  exam = new Exam({ 
+    userId: user._id,
+    subjectCombination: user.subjectCombination,
+    status: 'active',
+    startTime: new Date()
+  });
+  await exam.save();
+}
 
     // Sending full payload to prevent frontend "undefined"
     res.json({ 

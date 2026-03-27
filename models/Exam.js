@@ -1,30 +1,26 @@
 const mongoose = require('mongoose');
 
 const ExamSchema = new mongoose.Schema({
-  // Link to the User
   userId: { 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'User', 
     required: true 
   },
-
-  // Active Subject List (The 4 subjects they are writing)
   subjectCombination: [String], 
+  
+  // ADD THIS LINE BELOW
+  status: { type: String, default: 'active' }, // 'active' or 'submitted'
 
-  // Track Every Response
   responses: [{
     questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Question' },
     subject: String,
-    selectedOptionKey: { type: String, default: null }, // e.g., "A"
+    selectedOptionKey: { type: String, default: null },
     isCorrect: { type: Boolean, default: false },
-    pointsEarned: { type: Number, default: 0 } // Weight * (1 or 0)
+    pointsEarned: { type: Number, default: 0 }
   }],
-
-  // Timing (Essential for CBT)
   startTime: { type: Date, default: Date.now },
-  endTime: { type: Date }, // Set this when the user clicks 'Submit'
-  timeLeft: { type: Number }, // Store remaining seconds periodically
-
+  endTime: { type: Date },
+  timeLeft: { type: Number },
   createdAt: { type: Date, default: Date.now }
 });
 
