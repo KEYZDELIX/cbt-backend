@@ -4,7 +4,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 
-// Models (Ensure your filenames match)
+// Models
 const Question = require('./models/Question');
 const Result = require('./models/Result');
 const User = require('./models/User');
@@ -14,23 +14,26 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// MongoDB Connection
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('🔥 MongoDB connected'))	
   .catch(err => console.error('❌ Connection error:', err));
 
-// Register User via Admin
+// --- ADMIN ROUTES ---
+
+// 1. Register User via Admin
 app.post('/admin/register-user', async (req, res) => {
     try {
         const { firstName, lastName, password, subjects } = req.body;
         
-        // Auto-generate Reg Number
+        // Auto-generate Reg Number with your preferred STT prefix
         const regNumber = `STT${Math.floor(100000 + Math.random() * 900000)}AB`;
         
         const newUser = new User({
             firstName,
             lastName,
             password,
-            regNumber,
+            regNumber: regNumber.toUpperCase(),
             subjectCombination: ['Use of English', ...subjects]
         });
 
@@ -41,7 +44,7 @@ app.post('/admin/register-user', async (req, res) => {
     }
 });
 
-// Standard Add Question
+// 2. Add Question via Admin
 app.post('/questions', async (req, res) => {
     try {
         const newQuestion = new Question(req.body);
@@ -52,24 +55,27 @@ app.post('/questions', async (req, res) => {
     }
 });
 
-// --- ROUTES ---
+// --- EXAM & USER ROUTES ---
 
-// --- LOGIN ROUTE ---
+// 3. Login Route (Fixed "Undefined" Error)
 app.post('/login', async (req, res) => {
   try {
     const { regNumber, password } = req.body;
 
-    // 1. Find the user
+    if (!regNumber || !password) {
+      return res.status(400).json({ message: "Credentials required" });
+    }
+
     const user = await User.findOne({ 
       regNumber: regNumber.toUpperCase(), 
       password: password 
     });
 
     if (!user) {
-      return res.status(401).json({ message: "Invalid Registration Number or Password" });
+      return res.status(401).json({ message: "Invalid Reg Number or Password" });
     }
 
-    // 2. Create or find an existing active exam session for this user
+    // Check for an existing active exam or create a new one
     let exam = await Exam.findOne({ userId: user._id, status: 'active' });
     
     if (!exam) {
@@ -82,11 +88,14 @@ app.post('/login', async (req, res) => {
       await exam.save();
     }
 
+    // Sending full payload to prevent frontend "undefined"
     res.json({ 
+      success: true,
       userId: user._id, 
       examId: exam._id, 
       firstName: user.firstName, 
       lastName: user.lastName,
+      regNumber: user.regNumber, 
       subjects: user.subjectCombination 
     });
   } catch (err) {
@@ -94,45 +103,11 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// 1. Start Exam: Create User and Session
-app.post('/start-exam', async (req, res) => {
-  try {
-    const { firstName, lastName, subjects } = req.body;
-
-    // Ensure Use of English is included
-    let finalSubjects = [...new Set(['Use of English', ...subjects])];
-    
-    if (finalSubjects.length !== 4) {
-      return res.status(400).json({ message: "Exactly 4 subjects required (including English)." });
-    }
-
-    const user = new User({ 
-      firstName, 
-      lastName, 
-      regNumber: generateRegNo(),
-      subjectCombination: finalSubjects 
-    });
-    await user.save();
-
-    const exam = new Exam({ 
-      userId: user._id,
-      subjectCombination: finalSubjects,
-      status: 'active',
-      startTime: new Date()
-    });
-    await exam.save();
-
-    res.json({ userId: user._id, examId: exam._id, regNumber: user.regNumber });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 2. Fetch Questions (Randomized by Subject)
+// 4. Fetch Questions (Randomized by Subject)
 app.get('/fetch-questions/:examId', async (req, res) => {
   try {
     const exam = await Exam.findById(req.params.examId);
-    if (!exam) return res.status(404).send("Exam not found");
+    if (!exam) return res.status(404).json({ message: "Exam not found" });
 
     let examPaper = [];
 
@@ -142,7 +117,7 @@ app.get('/fetch-questions/:examId', async (req, res) => {
       const qs = await Question.aggregate([
         { $match: { subject: subject } },
         { $sample: { size: limit } },
-        { $project: { correctOptionKey: 0 } } // HIDE the answer from the frontend!
+        { $project: { correctOptionKey: 0 } } // Security: Hide answers
       ]);
       examPaper.push({ subject, questions: qs });
     }
@@ -153,7 +128,7 @@ app.get('/fetch-questions/:examId', async (req, res) => {
   }
 });
 
-// 3. Save Answer (Individual response persistence)
+// 5. Save Answer (Live Persistence)
 app.post('/save-answer', async (req, res) => {
   try {
     const { examId, questionId, selectedOptionKey } = req.body;
@@ -187,13 +162,13 @@ app.post('/save-answer', async (req, res) => {
   }
 });
 
-// 4. Submit & Calculate Final Results
+// 6. Submit Exam & Generate Final Result
 app.post('/submit-exam', async (req, res) => {
   try {
     const { examId } = req.body;
     const exam = await Exam.findById(examId).populate('userId');
     
-    if (exam.status === 'submitted') return res.status(400).json({ message: "Already submitted" });
+    if (exam.status === 'submitted') return res.status(400).json({ message: "Exam already submitted" });
 
     let subjectBreakdown = [];
     let grandTotal = 0;
@@ -202,18 +177,16 @@ app.post('/submit-exam', async (req, res) => {
       const responses = exam.responses.filter(r => r.subject === subjectName);
       const correctCount = responses.filter(r => r.isCorrect).length;
       
-      // Calculate Weighted Score for this subject
-      // Sum of points earned / total weight of questions attempted
       const rawScore = responses.reduce((acc, curr) => acc + curr.pointsEarned, 0);
-      const totalPossibleWeight = (subjectName === "Use of English") ? 60 : 40; // Assuming avg weight 1
+      const totalPossibleWeight = (subjectName === "Use of English") ? 60 : 40; 
       
-      // Scale to 100
+      // Scaling to 100
       const weightedScore = Math.min(100, (rawScore / totalPossibleWeight) * 100);
       
       subjectBreakdown.push({
         subjectName,
         correctCount,
-        totalQuestions: (subjectName === "Use of English") ? 60 : 40,
+        totalQuestions: totalPossibleWeight,
         weightedScore: Math.round(weightedScore)
       });
 
@@ -239,11 +212,20 @@ app.post('/submit-exam', async (req, res) => {
   }
 });
 
-// 5. Admin: View All Results
+// 7. Admin: View All Results
 app.get('/all-results', async (req, res) => {
-  const results = await Result.find().populate('userId', 'firstName lastName regNumber').sort({ examDate: -1 });
-  res.json(results);
+  try {
+    const results = await Result.find()
+      .populate('userId', 'firstName lastName regNumber')
+      .sort({ examDate: -1 });
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
+// Server Initialization
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
