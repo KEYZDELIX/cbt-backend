@@ -21,7 +21,12 @@ const ExamSchema = new mongoose.Schema({
   startTime: { type: Date, default: Date.now },
   endTime: { type: Date },
   timeLeft: { type: Number },
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+  timestamp: { type: Date, default: Date.now }
 });
+
+attemptNumber: { type: Number, default: 1 },
+configId: { type: mongoose.Schema.Types.ObjectId, ref: 'ExamConfig' },
+
 
 module.exports = mongoose.model('Exam', ExamSchema);

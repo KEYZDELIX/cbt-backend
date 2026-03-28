@@ -61,6 +61,30 @@ app.post('/questions', async (req, res) => {
 app.post('/login', async (req, res) => {
   try {
     const { regNumber, password } = req.body;
+    const user = await User.findOne({ regNumber: regNumber.toUpperCase(), password });
+    if (!user) return res.status(401).json({ message: "Invalid Credentials" });
+
+    // Find active config or most recent config
+    const config = await ExamConfig.findOne({ isActive: true }); 
+    
+    // Check attempts
+    const attemptCount = await Exam.countDocuments({ userId: user._id, status: 'submitted' });
+    const canTakeExam = config ? (attemptCount < config.maxAttempts) : true;
+
+    res.json({
+      success: true,
+      user,
+      config: config || { name: "General Mock", durationMinutes: 120 },
+      attemptCount,
+      canTakeExam
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+/*app.post('/login', async (req, res) => {
+  try {
+    const { regNumber, password } = req.body;
 
     if (!regNumber || !password) {
       return res.status(400).json({ message: "Credentials required" });
@@ -103,27 +127,69 @@ if (!exam) {
     res.status(500).json({ error: err.message });
   }
 });
-
-// 4. Fetch Questions (Randomized by Subject)
+*/
+// 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
 app.get('/fetch-questions/:examId', async (req, res) => {
   try {
-    const exam = await Exam.findById(req.params.examId);
+    const exam = await Exam.findById(req.params.examId).populate('configId');
     if (!exam) return res.status(404).json({ message: "Exam not found" });
 
-    let examPaper = [];
+    // Get the config settings
+    const shuffleQs = exam.configId ? exam.configId.shuffleQuestions : true;
+    const shuffleOpts = exam.configId ? exam.configId.shuffleOptions : true;
 
+    let examPaper = [];
     for (let subject of exam.subjectCombination) {
       const limit = (subject === "Use of English") ? 60 : 40;
       
-      const qs = await Question.aggregate([
+      let qs = await Question.aggregate([
         { $match: { subject: subject } },
         { $sample: { size: limit } },
-        { $project: { correctOptionKey: 0 } } // Security: Hide answers
+        { $project: { correctOptionKey: 0 } } 
       ]);
+    // Apply Shuffling
+      if (shuffleOpts) {
+        qs = qs.map(q => {
+          q.options = q.options.sort(() => Math.random() - 0.5);
+          return q;
+        });
+      }
+
       examPaper.push({ subject, questions: qs });
     }
-
     res.json(examPaper);
+ } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
+  try {
+    const { resultId, subject } = req.params;
+    const result = await Result.findById(resultId).populate('examId');
+    if (!result) return res.status(404).json({ message: "Result not found" });
+
+    // Get all questions for this subject
+    const allQs = await Question.find({ subject: subject });
+    
+    // Map the student's responses to the questions
+    const script = allQs.map(q => {
+      const response = result.examId.responses.find(r => r.questionId.toString() === q._id.toString());
+      return {
+        questionText: q.questionText,
+        options: q.options,
+        correctKey: q.correctOptionKey,
+        selectedKey: response ? response.selectedOptionKey : null,
+        isCorrect: response ? response.isCorrect : false,
+        explanation: q.explanation
+      };
+    });
+
+    res.json({
+      studentName: result.userId, // You might need to populate this in the query
+      subject: subject,
+      questions: script
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
