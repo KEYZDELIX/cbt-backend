@@ -9,6 +9,7 @@ const Question = require('./models/Question');
 const Result = require('./models/Result');
 const User = require('./models/User');
 const Exam = require('./models/Exam');
+const ExamConfig = require('./models/ExamConfig');
 
 const app = express();
 app.use(cors());
