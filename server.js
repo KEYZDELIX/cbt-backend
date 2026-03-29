@@ -10,7 +10,7 @@ const Result = require('./models/Result');
 const User = require('./models/User');
 const Exam = require('./models/Exam');
 const ExamConfig = require('./models/ExamConfig');
-const bcrypt = require('bcrypt'); // Highly recommended for password security
+const bcrypt = require('bcryptjs'); // Highly recommended for password security
 
 const app = express();
 app.use(cors());
