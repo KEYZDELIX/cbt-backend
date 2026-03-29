@@ -10,6 +10,7 @@ const Result = require('./models/Result');
 const User = require('./models/User');
 const Exam = require('./models/Exam');
 const ExamConfig = require('./models/ExamConfig');
+const bcrypt = require('bcrypt'); // Highly recommended for password security
 
 const app = express();
 app.use(cors());
@@ -22,25 +23,38 @@ mongoose.connect(process.env.MONGO_URI)
 
 // --- ADMIN ROUTES ---
 
-// 1. Register User via Admin
 app.post('/admin/register-user', async (req, res) => {
     try {
-        const { firstName, lastName, password, subjects } = req.body;
-        
-        // Auto-generate Reg Number with your preferred STT prefix
-        const regNumber = `STT${Math.floor(100000 + Math.random() * 900000)}AB`;
-        
+        const { 
+            firstName, middleName, lastName, gender, 
+            email, phone, courseOfStudy, classLevel, 
+            password, subjects 
+        } = req.body;
+       const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        // Auto-generate Reg Number (SST2026 + 5 random digits + 2 random letters)
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        const randomLetters = chars[Math.floor(Math.random() * 26)] + chars[Math.floor(Math.random() * 26)];
+        const regNumber = `SST2026${Math.floor(10000 + Math.random() * 90000)}${randomLetters}`;
+
         const newUser = new User({
             firstName,
+            middleName,
             lastName,
-            password,
-            regNumber: regNumber.toUpperCase(),
-            subjectCombination: ['Use of English', ...subjects]
+            gender,
+            email,
+            phone,
+            courseOfStudy,
+            classLevel,
+            password: hashedPassword, // Note: Use bcrypt.hash if you have it set up
+            regNo: regNumber.toUpperCase(),
+            subjectCombination: ['Use of English', ...subjects] // Adds English automatically
         });
 
         await newUser.save();
-        res.json({ success: true, regNumber: newUser.regNumber });
+        res.json({ success: true, regNumber: newUser.regNo });
     } catch (err) {
+        console.error("Enrollment Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -162,6 +176,21 @@ app.get('/fetch-questions/:examId', async (req, res) => {
  } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.post('/start-exam', async (req, res) => {
+    const { userId } = req.body;
+    const user = await User.findById(userId);
+    
+    const newExam = new Exam({
+        userId: user._id,
+        subjectCombination: user.subjectCombination,
+        status: 'active',
+        startTime: new Date()
+    });
+    
+    await newExam.save();
+    res.json({ examId: newExam._id });
 });
 
 app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
@@ -292,8 +321,88 @@ app.get('/all-results', async (req, res) => {
   }
 });
 
+// Example Express Route
+app.get('/api/topics', async (req, res) => {
+    try {
+        const { subject } = req.query;
+        // Find all questions for this subject and return unique topic names
+        const topics = await Question.distinct('topic', { subject: subject });
+        res.json(topics);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch topics" });
+    }
+});
+
+//Merger
+app.post('/api/topics/merge', async (req, res) => {
+    const { subject, oldTopic, newTopic } = req.body;
+    try {
+        const result = await Question.updateMany(
+            { subject: subject, topic: oldTopic },
+            { $set: { topic: newTopic } }
+        );
+        res.json({ message: "Success", modifiedCount: result.modifiedCount });
+    } catch (err) {
+        res.status(500).json({ error: "Merge failed" });
+    }
+});
+app.get('/api/topics/stats', async (req, res) => {
+    try {
+        const { subject } = req.query;
+        const stats = await Question.aggregate([
+            { $match: { subject: subject } }, // Filter by subject (e.g., Physics)
+            { $group: { _id: "$topic", count: { $sum: 1 } } }, // Group by topic name
+            { $sort: { count: 1 } } // Sort from fewest to most questions
+        ]);
+        res.json(stats);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch analytics" });
+    }
+});
+
+//--+-+ Manage Exam 
+
+app.post('/api/exams/save', async (req, res) => {
+    const { id, title, duration, shuffleType, attempts, status, assignedStudents } = req.body;
+    
+    try {
+        const examData = {
+            name: title,
+            durationMinutes: duration,
+            shuffleType: shuffleType,
+            maxAttempts: attempts,
+            status: status,
+            assignedStudents: assignedStudents
+        };
+
+        if (id) {
+            // UPDATE: Find by ID and replace data
+            const updated = await ExamConfig.findByIdAndUpdate(id, examData, { new: true });
+            res.json({ message: "Exam updated successfully!", data: updated });
+        } else {
+            // CREATE: New entry
+            const newExam = new ExamConfig(examData);
+            await newExam.save();
+            res.json({ message: "Exam created successfully!", data: newExam });
+        }
+    } catch (err) {
+        console.error("Database Error:", err);
+        res.status(500).json({ error: "Failed to save exam configuration." });
+    }
+});
+
 // Server Initialization
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
+// Run this ONCE to migrate old data to the new format
+async function migrateOldExams() {
+    await ExamConfig.updateMany(
+        { status: { $exists: false } }, 
+        { $set: { status: 'active', shuffleType: 'both' } }
+    );
+    console.log("Migration complete: Old exams updated to new status/shuffle format.");
+}
+// migrateOldExams(); // Uncomment this, run once, then delete it.

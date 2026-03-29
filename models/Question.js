@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const QuestionSchema = new mongoose.Schema({
   subject: { type: String, required: true, index: true },
-  topic: { type: String, required: true },
+  topic: { type: String, required: true, inded: true},
   
   // Main Question Content
   questionText: { type: String, required: true },
