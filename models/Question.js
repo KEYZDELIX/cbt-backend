@@ -26,7 +26,7 @@ const QuestionSchema = new mongoose.Schema({
   },
   explanation: { type: String },
   
-  createdAt: { type: Date, default: Date.now },
-{ timestamps: true });
+  createdAt: { type: Date, default: Date.now }
+},{ timestamps: true });
 
 module.exports = mongoose.model('Question', QuestionSchema);
