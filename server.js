@@ -30,12 +30,13 @@ app.post('/admin/register-user', async (req, res) => {
             email, phone, courseOfStudy, classLevel, 
             password, subjects 
         } = req.body;
+        const plainPassword = password;
        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
+        const hashedPassword = await bcrypt.hash(plainPassword, salt);
         // Auto-generate Reg Number (SST2026 + 5 random digits + 2 random letters)
         const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         const randomLetters = chars[Math.floor(Math.random() * 26)] + chars[Math.floor(Math.random() * 26)];
-        const regNumber = `SST2026${Math.floor(10000 + Math.random() * 90000)}${randomLetters}`;
+        const regNumber = `SST26${Math.floor(1000 + Math.random() * 9000)}${randomLetters}`;
 
         const newUser = new User({
             firstName,
@@ -52,7 +53,11 @@ app.post('/admin/register-user', async (req, res) => {
         });
 
         await newUser.save();
-        res.json({ success: true, regNumber: newUser.regNo });
+        res.json({ 
+            success: true, 
+            regNumber: newUser.regNo, 
+            password: plainPassword // <--- This fixes the 'undefined'
+        });
     } catch (err) {
         console.error("Enrollment Error:", err);
         res.status(500).json({ error: err.message });
@@ -67,6 +72,16 @@ app.post('/questions', async (req, res) => {
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// DELETE QUESTION
+app.delete('/questions/:id', async (req, res) => {
+    try {
+        await Question.findByIdAndDelete(req.params.id);
+        res.json({ message: "Question deleted successfully" });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to delete question" });
     }
 });
 
@@ -357,6 +372,22 @@ app.get('/api/topics/stats', async (req, res) => {
         res.json(stats);
     } catch (err) {
         res.status(500).json({ error: "Failed to fetch analytics" });
+    }
+});
+// GET TOPIC INFO: Returns count for a specific topic or list for subject
+app.get('/api/topics/info', async (req, res) => {
+    try {
+        const { subject, topic } = req.query;
+        if (topic) {
+            // If a topic is provided, just return the count for that one
+            const count = await Question.countDocuments({ subject, topic });
+            return res.json({ count });
+        }
+        // Otherwise, return the distinct list of topics for the subject
+        const topics = await Question.distinct('topic', { subject });
+        res.json(topics);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch topic data" });
     }
 });
 
