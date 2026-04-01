@@ -74,6 +74,17 @@ app.post('/questions', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+// GET ALL QUESTIONS (For the Manage Table)
+app.get('/questions', async (req, res) => {
+    try {
+        // We sort by -1 so the newest questions appear at the top
+        const questions = await Question.find().sort({ updatedAt: -1 });
+        res.json(questions);
+    } catch (err) {
+        res.status(500).json({ error: "Could not fetch questions" });
+    }
+});
+
 
 // DELETE QUESTION
 app.delete('/questions/:id', async (req, res) => {
@@ -82,6 +93,20 @@ app.delete('/questions/:id', async (req, res) => {
         res.json({ message: "Question deleted successfully" });
     } catch (err) {
         res.status(500).json({ error: "Failed to delete question" });
+    }
+});
+
+// UPDATE EXISTING QUESTION
+app.put('/questions/:id', async (req, res) => {
+    try {
+        const updatedQuestion = await Question.findByIdAndUpdate(
+            req.params.id, 
+            req.body, 
+            { new: true } // This returns the updated version
+        );
+        res.json({ success: true, data: updatedQuestion });
+    } catch (err) {
+        res.status(500).json({ error: "Update failed" });
     }
 });
 
