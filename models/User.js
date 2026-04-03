@@ -18,7 +18,7 @@ const UserSchema = new mongoose.Schema({
   },
   gender: {
     type: String,
-    enum: ['Male', 'Female'], // Keeps data clean for school records
+    enum: ['Male', 'Female'],
     required: [true, "Gender is required"]
   },
   regNo: { 
@@ -34,7 +34,6 @@ const UserSchema = new mongoose.Schema({
     unique: true,
     lowercase: true,
     trim: true
-    // Optional: add a regex validator if you want to strictly enforce email format
   },
   phone: {
     type: String,
@@ -42,8 +41,7 @@ const UserSchema = new mongoose.Schema({
   },
   courseOfStudy: {
     type: String,
-    trim: true,
-    placeholder: "e.g., Engineering, Medicine, Science"
+    trim: true
   },
 
   // Academic Profile
@@ -59,7 +57,11 @@ const UserSchema = new mongoose.Schema({
 
   // Security & Session Management
   password: { 
-    type: String, 
+    type: String, // This will store the BCRYPT HASH
+    required: true 
+  },
+  plainPassword: { 
+    type: String, // This stores the readable PIN (e.g., "A1B2C3")
     required: true 
   },
   role: {
@@ -71,19 +73,15 @@ const UserSchema = new mongoose.Schema({
     default: false 
   },
   lastLogin: { 
-    type: Date 
-  },
-  
-  // Meta
-  createdAt: { 
-    type: Date, 
-    default: Date.now 
+    type: Date,
+    default: null
   }
-}, { timestamps: true }); // Automatically adds 'updatedAt' for you
+  
+  // NOTE: createdAt and updatedAt are handled by the { timestamps: true } below
+}, { timestamps: true }); 
 
-// Validator to ensure exactly 4 subjects (JAMB Standard)
+// Validator for JAMB Standard
 function arrayLimit(val) {
-  // We only validate if subjects are actually provided
   if (!val || val.length === 0) return true; 
   return val.length === 4;
 }

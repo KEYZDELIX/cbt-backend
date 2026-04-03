@@ -54,39 +54,84 @@ app.post('/admin/register-user', async (req, res) => {
             email, phone, courseOfStudy, classLevel, 
             password, subjects 
         } = req.body;
-        const plainPassword = password;
-       const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(plainPassword, salt);
-        // Auto-generate Reg Number (SST2026 + 5 random digits + 2 random letters)
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        // Auto-generate Reg Number
         const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         const randomLetters = chars[Math.floor(Math.random() * 26)] + chars[Math.floor(Math.random() * 26)];
-        const regNumber = `SST26${Math.floor(1000 + Math.random() * 9000)}${randomLetters}`;
+        const regNumber = `SST26${Math.floor(1000 + Math.random() * 9000)}${randomLetters}`.toUpperCase();
 
         const newUser = new User({
-            firstName,
-            middleName,
-            lastName,
-            gender,
-            email,
-            phone,
-            courseOfStudy,
-            classLevel,
-            password: hashedPassword, // Note: Use bcrypt.hash if you have it set up
-            regNo: regNumber.toUpperCase(),
-            subjectCombination: ['Use of English', ...subjects] // Adds English automatically
+            firstName, middleName, lastName, gender,
+            email, phone, courseOfStudy, classLevel,
+            password: hashedPassword,
+            plainPassword: password,
+            regNo: regNumber,
+            subjectCombination: ['Use of English', ...subjects]
         });
 
         await newUser.save();
+        
+        // Return plain password ONLY here so the Success Modal can show it once
         res.json({ 
             success: true, 
             regNumber: newUser.regNo, 
-            password: plainPassword // <--- This fixes the 'undefined'
+            password: password 
         });
     } catch (err) {
-        console.error("Enrollment Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
+app.put('/admin/users/:id', async (req, res) => {
+    try {
+        const { password, subjects, ...otherData } = req.body;
+        const updatePayload = { ...otherData };
+
+        // 1. Only hash and update password if a new one was actually typed
+        if (password && password.trim() !== "") {
+            const salt = await bcrypt.genSalt(10);
+            updatePayload.password = await bcrypt.hash(password, salt);
+        }
+
+        // 2. Re-process subjects if they were changed
+        if (subjects) {
+            updatePayload.subjectCombination = ['Use of English', ...subjects];
+        }
+
+        const updatedUser = await User.findByIdAndUpdate(
+            req.params.id, 
+            { $set: updatePayload }, 
+            { new: true }
+        );
+
+        res.json({ success: true, user: updatedUser });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get all users for the "View Registered Users" list
+app.get('/admin/users', async (req, res) => {
+    try {
+        const users = await User.find().sort({ createdAt: -1 });
+        res.json(users);
+    } catch (err) {
+        res.status(500).json({ error: "Could not fetch users" });
+    }
+});
+
+// Delete a user
+app.delete('/admin/users/:id', async (req, res) => {
+    try {
+        await User.findByIdAndDelete(req.params.id);
+        res.json({ success: true, message: "User deleted successfully" });
+    } catch (err) {
+        res.status(500).json({ error: "Delete failed" });
+    }
+});
+
 
 // 2. Add Question via Admin
 app.post('/questions', async (req, res) => {
