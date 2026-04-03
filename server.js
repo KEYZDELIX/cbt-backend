@@ -3,6 +3,30 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const cloudinary = require('cloudinary').v2;
+const multer = require('multer');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+
+// 1. Configure Cloudinary
+cloudinary.config({
+    cloud_name: process.env.CLOUDY_NAME,
+    api_key: process.env.CLOUDY_KEY,
+    api_secret: process.env.CLOUDY_SECRET
+});
+
+console.log("Cloudinary Configured:", process.env.CLOUDY_NAME ? "YES" : "NO");
+
+
+// 2. Set up the Storage Engine
+const storage = new CloudinaryStorage({
+    cloudinary: cloudinary,
+    params: {
+        folder: 'quiz_images', // Folder name in Cloudinary
+        allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
+        transformation: [{ width: 1000, crop: "limit" }] // Auto-resize for efficiency
+    },
+});
+const upload = multer({ storage: storage });
 
 // Models
 const Question = require('./models/Question');
@@ -109,6 +133,22 @@ app.put('/questions/:id', async (req, res) => {
         res.status(500).json({ error: "Update failed" });
     }
 });
+
+app.post('/api/upload', upload.single('image'), (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+        
+        // Cloudinary returns the secure URL in req.file.path
+        console.log("File uploaded to Cloudinary:", req.file.path);
+        res.json({ url: req.file.path });
+    } catch (err) {
+        console.error("Cloudinary Upload Error:", err);
+        res.status(500).json({ error: 'Internal Server Error during upload' });
+    }
+});
+
 
 // --- EXAM & USER ROUTES ---
 
