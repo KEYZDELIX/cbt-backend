@@ -93,6 +93,7 @@ app.put('/admin/users/:id', async (req, res) => {
         if (password && password.trim() !== "") {
             const salt = await bcrypt.genSalt(10);
             updatePayload.password = await bcrypt.hash(password, salt);
+            updatePayload.plainPassword = password;
         }
 
         // 2. Re-process subjects if they were changed
@@ -115,10 +116,33 @@ app.put('/admin/users/:id', async (req, res) => {
 // Get all users for the "View Registered Users" list
 app.get('/admin/users', async (req, res) => {
     try {
-        const users = await User.find().sort({ createdAt: -1 });
-        res.json(users);
+        const { search, level, gender, course } = req.query;
+        let query = {};
+
+        // 1. Search by Name or RegNo
+        if (search) {
+            query.$or = [
+                { firstName: { $regex: search, $options: 'i' } },
+                { lastName: { $regex: search, $options: 'i' } },
+                { regNo: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        // 2. Filter by Level
+        if (level) query.classLevel = level;
+
+        // 3. Filter by Gender
+        if (gender) query.gender = gender;
+
+        // 4. Filter by Course
+        if (course) query.courseOfStudy = { $regex: course, $options: 'i' };
+
+        const users = await User.find(query).sort({ createdAt: -1 });
+        const count = await User.countDocuments(query);
+
+        res.json({ success: true, users, count });
     } catch (err) {
-        res.status(500).json({ error: "Could not fetch users" });
+        res.status(500).json({ error: err.message });
     }
 });
 
