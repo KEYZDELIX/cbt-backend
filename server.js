@@ -174,6 +174,17 @@ app.post('/questions', async (req, res) => {
     try {
         const newQuestion = new Question(req.body);
         await newQuestion.save();
+        // Inside your save/update route
+if (questionData.subject === "Use of English" && questionData.passage) {
+    // Update ALL questions with this passage name to have the new content
+    await Question.updateMany(
+        { 
+            subject: "Use of English", 
+            subSubTopic: questionData.subSubTopic 
+        }, 
+        { $set: { passage: questionData.passage } }
+    );
+}
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
