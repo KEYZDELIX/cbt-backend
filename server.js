@@ -77,8 +77,9 @@ app.post('/admin/register-user', async (req, res) => {
         // Return plain password ONLY here so the Success Modal can show it once
         res.json({ 
             success: true, 
-            regNumber: newUser.regNo, 
-            password: password 
+            regNumber: updatedUser.regNo, 
+            password: password || updatedUser.plainPassword,
+            user: updatedUser
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
