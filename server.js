@@ -583,27 +583,30 @@ app.get('/api/topics/subsub', async (req, res) => {
 app.get('/api/subsub/check', async (req, res) => {
     try {
         const { name, subTopic } = req.query;
+        
+        // Count how many questions exist with this passage name
         const count = await Question.countDocuments({ 
             subject: "Use of English", 
-            subTopic: subTopic, 
             subSubTopic: name 
         });
         
-        // Find the first question in this group to steal its passage text
-        const existingQuestion = await Question.findOne({ 
+        // Find one question to get the passage text from
+        const sample = await Question.findOne({ 
             subject: "Use of English", 
             subSubTopic: name 
         });
 
+        // Send back a clean JSON object
         res.json({
             exists: count > 0,
             count: count,
-            passage: existingQuestion ? existingQuestion.passage : ""
+            passage: sample ? sample.passage : ""
         });
     } catch (err) {
-        res.status(500).json({ error: "Check failed" });
+        res.status(500).json({ error: err.message });
     }
 });
+
 
 //--+-+ Manage Exam 
 
