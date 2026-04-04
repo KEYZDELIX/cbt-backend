@@ -174,17 +174,17 @@ app.post('/questions', async (req, res) => {
     try {
         const newQuestion = new Question(req.body);
         await newQuestion.save();
-        // Inside your save/update route
-if (questionData.subject === "Use of English" && questionData.passage) {
-    // Update ALL questions with this passage name to have the new content
+        // Inside your save/update route// Inside your app.post('/questions') or app.put('/questions/:id')
+const questionData = req.body;
+
+if (questionData.subject === "Use of English" && questionData.subSubTopic && questionData.passage) {
+    // This part ensures that "Passage 1" always stays identical across all questions
     await Question.updateMany(
-        { 
-            subject: "Use of English", 
-            subSubTopic: questionData.subSubTopic 
-        }, 
+        { subject: "Use of English", subSubTopic: questionData.subSubTopic },
         { $set: { passage: questionData.passage } }
     );
 }
+
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -561,6 +561,47 @@ app.get('/api/subsubtopics', async (req, res) => {
         }
     } catch (err) {
         res.status(500).json({ error: "Server error" });
+    }
+});
+
+// 1. GET ALL UNIQUE SUB-SUBTOPICS (For the Datalist)
+app.get('/api/topics/subsub', async (req, res) => {
+    try {
+        const { subTopic } = req.query;
+        // Returns unique passage names like "Passage 1", "The Life Changer", etc.
+        const subsubs = await Question.distinct('subSubTopic', { 
+            subject: "Use of English", 
+            subTopic: subTopic 
+        });
+        res.json(subsubs.filter(s => s)); // Filter out empty strings
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch sub-subtopics" });
+    }
+});
+
+// 2. CHECK SPECIFIC SUB-SUBTOPIC (For Status & Auto-load Passage)
+app.get('/api/subsub/check', async (req, res) => {
+    try {
+        const { name, subTopic } = req.query;
+        const count = await Question.countDocuments({ 
+            subject: "Use of English", 
+            subTopic: subTopic, 
+            subSubTopic: name 
+        });
+        
+        // Find the first question in this group to steal its passage text
+        const existingQuestion = await Question.findOne({ 
+            subject: "Use of English", 
+            subSubTopic: name 
+        });
+
+        res.json({
+            exists: count > 0,
+            count: count,
+            passage: existingQuestion ? existingQuestion.passage : ""
+        });
+    } catch (err) {
+        res.status(500).json({ error: "Check failed" });
     }
 });
 
