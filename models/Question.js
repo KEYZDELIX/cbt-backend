@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const QuestionSchema = new mongoose.Schema({
-  : { type: String, required: true, index: true },
+  subject: { type: String, required: true, index: true },
   
   // For English, this stores "Section A", "Section B", etc.
   // For Math/Physics, it stores "Algebra", "Calculus", etc.
