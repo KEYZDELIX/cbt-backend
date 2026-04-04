@@ -537,6 +537,22 @@ app.get('/api/topics/info', async (req, res) => {
     }
 });
 
+app.get('/api/subsubtopics', async (req, res) => {
+    try {
+        const { subject, name } = req.query;
+        // Find if any question already uses this subSubTopic
+        const existing = await Question.findOne({ subject, subSubTopic: name });
+        
+        if (existing) {
+            res.json({ exists: true, passage: existing.passage });
+        } else {
+            res.json({ exists: false });
+        }
+    } catch (err) {
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
 //--+-+ Manage Exam 
 
 app.post('/api/exams/save', async (req, res) => {
