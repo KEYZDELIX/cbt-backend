@@ -1,8 +1,22 @@
 const mongoose = require('mongoose');
 
 const QuestionSchema = new mongoose.Schema({
-  subject: { type: String, required: true, index: true },
-  topic: { type: String, required: true, inded: true},
+  : { type: String, required: true, index: true },
+  
+  // For English, this stores "Section A", "Section B", etc.
+  // For Math/Physics, it stores "Algebra", "Calculus", etc.
+  topic: { type: String, required: true, index: true },
+
+  // --- NEW FIELDS FOR STRUCTURED SUBJECTS ---
+  
+  // Stores "Comprehension Passage", "Synonyms", etc.
+  subTopic: { type: String, default: "" }, 
+  
+  // Stores the specific Group Name or Passage Title (e.g., "Passage 1")
+  subSubTopic: { type: String, default: "" }, 
+  
+  // Stores the actual story or cloze text for the group
+  passage: { type: String, default: "" },
   
   // Main Question Content
   questionText: { type: String, required: true },
