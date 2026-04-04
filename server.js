@@ -75,11 +75,11 @@ app.post('/admin/register-user', async (req, res) => {
         await newUser.save();
         
         // Return plain password ONLY here so the Success Modal can show it once
-        res.json({ 
-            success: true, 
-            regNumber: updatedUser.regNo, 
-            password: password || updatedUser.plainPassword,
-            user: updatedUser
+        res.json({ success: true, 
+        regNumber: newUser.regNo, 
+        password: password, // The plain text password from req.body
+        user: newUser
+          
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -96,7 +96,13 @@ app.put('/admin/users/:id', async (req, res) => {
             updatePayload.password = await bcrypt.hash(password, salt);
             updatePayload.plainPassword = password;
         }
-
+        
+        const existingUser = await User.findById(req.params.id);
+        if (!existingUser.regNo) {
+            const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            const randomLetters = chars[Math.floor(Math.random() * 26)] + chars[Math.floor(Math.random() * 26)];
+            updatePayload.regNo = `SST26${Math.floor(1000 + Math.random() * 9000)}${randomLetters}`.toUpperCase();
+        }
         // 2. Re-process subjects if they were changed
         if (subjects) {
             updatePayload.subjectCombination = ['Use of English', ...subjects];
@@ -105,10 +111,15 @@ app.put('/admin/users/:id', async (req, res) => {
         const updatedUser = await User.findByIdAndUpdate(
             req.params.id, 
             { $set: updatePayload }, 
-            { new: true }
+            { returnDocument: 'after' }
         );
 
-        res.json({ success: true, user: updatedUser });
+        res.json({ 
+            success: true, 
+            regNumber: updatedUser.regNo, 
+            password: password || updatedUser.plainPassword,
+            user: updatedUser 
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
