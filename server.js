@@ -269,52 +269,7 @@ app.post('/login', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-/*app.post('/login', async (req, res) => {
-  try {
-    const { regNumber, password } = req.body;
 
-    if (!regNumber || !password) {
-      return res.status(400).json({ message: "Credentials required" });
-    }
-
-    const user = await User.findOne({ 
-      regNumber: regNumber.toUpperCase(), 
-      password: password 
-    });
-
-    // Inside app.post('/login'...)
-let exam = await Exam.findOne({ userId: user._id, status: 'active' });
-
-if (!exam) {
-  // Ensure user.subjectCombination actually has data!
-  if (!user.subjectCombination || user.subjectCombination.length === 0) {
-      return res.status(400).json({ message: "No subjects assigned to this user. Contact Admin." });
-  }
-
-  exam = new Exam({ 
-    userId: user._id,
-    subjectCombination: user.subjectCombination,
-    status: 'active',
-    startTime: new Date()
-  });
-  await exam.save();
-}
-
-    // Sending full payload to prevent frontend "undefined"
-    res.json({ 
-      success: true,
-      userId: user._id, 
-      examId: exam._id, 
-      firstName: user.firstName, 
-      lastName: user.lastName,
-      regNumber: user.regNumber, 
-      subjects: user.subjectCombination 
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-*/
 // 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
 app.get('/fetch-questions/:examId', async (req, res) => {
   try {
@@ -582,60 +537,140 @@ app.get('/api/topics/subsub', async (req, res) => {
 // 2. CHECK SPECIFIC SUB-SUBTOPIC (For Status & Auto-load Passage)
 app.get('/api/subsub/check', async (req, res) => {
     try {
-        const { name, subTopic } = req.query;
+        const { name } = req.query;
         
-        // Count how many questions exist with this passage name
+        // Count all questions sharing this passage name
         const count = await Question.countDocuments({ 
             subject: "Use of English", 
             subSubTopic: name 
         });
         
-        // Find one question to get the passage text from
-        const sample = await Question.findOne({ 
+        const existing = await Question.findOne({ 
             subject: "Use of English", 
             subSubTopic: name 
         });
 
-        // Send back a clean JSON object
         res.json({
             exists: count > 0,
             count: count,
-            passage: sample ? sample.passage : ""
+            passage: existing ? existing.passage : ""
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Server check failed" });
     }
 });
 
 
+
 //--+-+ Manage Exam 
-
+// SAVE OR UPDATE EXAM CONFIGURATION
 app.post('/api/exams/save', async (req, res) => {
-    const { id, title, duration, shuffleType, attempts, status, assignedStudents } = req.body;
-    
-    try {
-        const examData = {
-            name: title,
-            durationMinutes: duration,
-            shuffleType: shuffleType,
-            maxAttempts: attempts,
-            status: status,
-            assignedStudents: assignedStudents
-        };
+    const { 
+        id, title, durationMinutes, maxAttempts, shuffleType, 
+        totalQuestions, assignmentType, startDateTime, 
+        endDateTime, batchSettings, englishDist, assignedStudents 
+    } = req.body;
 
+    const data = {
+        title, durationMinutes, maxAttempts, shuffleType,
+        totalQuestions, assignmentType, startDateTime,
+        endDateTime, batchSettings, englishDist, assignedStudents
+    };
+
+    try {
         if (id) {
-            // UPDATE: Find by ID and replace data
-            const updated = await ExamConfig.findByIdAndUpdate(id, examData, { new: true });
-            res.json({ message: "Exam updated successfully!", data: updated });
+            await ExamConfig.findByIdAndUpdate(id, data);
+            res.json({ message: "Exam Updated" });
         } else {
-            // CREATE: New entry
-            const newExam = new ExamConfig(examData);
-            await newExam.save();
-            res.json({ message: "Exam created successfully!", data: newExam });
+            const newEx = new ExamConfig(data);
+            await newEx.save();
+            res.json({ message: "Exam Created" });
         }
     } catch (err) {
         console.error("Database Error:", err);
-        res.status(500).json({ error: "Failed to save exam configuration." });
+        res.status(500).json({ error: "Failed to save exam configuration: " + err.message });
+    }
+});
+// GET ALL EXAMS (Sorted by most recent)
+app.get('/api/exams', async (req, res) => {
+    try {
+        const exams = await ExamConfig.find().sort({ createdAt: -1 });
+        res.json(exams);
+    } catch (err) {
+        res.status(500).json({ error: "Could not fetch exams" });
+    }
+});
+// DELETE EXAM
+app.delete('/api/exams/:id', async (req, res) => {
+    try {
+        const deleted = await ExamConfig.findByIdAndDelete(req.params.id);
+        if (!deleted) return res.status(404).json({ error: "Exam already deleted or not found" });
+        res.json({ message: "Exam deleted successfully" });
+    } catch (err) {
+        res.status(500).json({ error: "Delete operation failed" });
+    }
+});
+// RESET EXAM PROGRESS (Clears assigned student records if needed)
+app.post('/api/exams/reset/:id', async (req, res) => {
+    try {
+        // This is where you would also clear a "Results" collection if you have one
+        // For now, we just ensure the Exam config remains but is ready for a fresh start
+        const exam = await ExamConfig.findById(req.params.id);
+        if (!exam) return res.status(404).json({ error: "Exam not found" });
+
+        // Logic: You can either clear assignedStudents or just return a success
+        // if you use a separate "UserExamSession" collection.
+        res.json({ message: "Exam sessions have been reset for this configuration." });
+    } catch (err) {
+        res.status(500).json({ error: "Reset failed" });
+    }
+});
+
+// 1. Fetch Students by Class (Group Add)
+app.get('/api/students/by-group', async (req, res) => {
+    try {
+        const { class: className } = req.query;
+        // Assuming your Student model has a 'class' and 'regNo' field
+        const students = await Student.find({ class: className }).select('regNo');
+        const regNumbers = students.map(s => s.regNo);
+        res.json(regNumbers);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch class" });
+    }
+});
+
+// 2. Search Students (Individual Add)
+app.get('/api/students/search', async (req, res) => {
+    try {
+        const q = req.query.q;
+        const students = await Student.find({
+            $or: [
+                { name: { $regex: q, $options: 'i' } },
+                { regNo: { $regex: q, $options: 'i' } }
+            ]
+        }).limit(10);
+        res.json(students);
+    } catch (err) {
+        res.status(500).json({ error: "Search failed" });
+    }
+});
+
+//Reset UserExamSession
+app.post('/api/exams/reset/:id', async (req, res) => {
+    const { type, regNumbers } = req.body;
+    const examId = req.params.id;
+
+    try {
+        if (type === 'all') {
+            // Delete all result records matching this exam ID
+            await Result.deleteMany({ examId: examId });
+        } else {
+            // Delete only records for specific registration numbers
+            await Result.deleteMany({ examId: examId, regNo: { $in: regNumbers } });
+        }
+        res.json({ message: "Reset complete" });
+    } catch (err) {
+        res.status(500).json({ error: "Reset failed" });
     }
 });
 
@@ -645,12 +680,3 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
 
-// Run this ONCE to migrate old data to the new format
-async function migrateOldExams() {
-    await ExamConfig.updateMany(
-        { status: { $exists: false } }, 
-        { $set: { status: 'active', shuffleType: 'both' } }
-    );
-    console.log("Migration complete: Old exams updated to new status/shuffle format.");
-}
-// migrateOldExams(); // Uncomment this, run once, then delete it.
