@@ -23,4 +23,4 @@ const examConfigSchema = new mongoose.Schema({
     assignmentType: String,
 }, { timestamps: true }); // This automatically adds createdAt and updatedAt
 
-module.exports = mongoose.model('ExamConfig', ExamConfigSchema);
+module.exports = mongoose.model('ExamConfig', examConfigSchema);
