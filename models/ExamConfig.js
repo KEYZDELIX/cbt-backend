@@ -18,6 +18,10 @@ const examConfigSchema = new mongoose.Schema({
         subTopic: String, 
         qty: Number 
     }],
+    otherSubjectsDist: {
+        qtyPerSubject: { type: Number, default: 40 },
+        pickFromEveryTopic: { type: Boolean, default: true }
+    },
     assignedStudents: [String],
     totalQuestions: Number,
     assignmentType: String,
