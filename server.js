@@ -642,7 +642,7 @@ app.get('/api/students/search', async (req, res) => {
         // Format the names for the frontend dropdown
         const formattedUsers = users.map(u => ({
             regNo: u.regNo,
-            fullName: `${u.firstName} ${u.lastName}`,
+            fullName: `${u.firstName} ${u.middleName} ${u.lastName}`,
             classLevel: u.classLevel
         }));
 
@@ -682,6 +682,127 @@ app.post('/api/exams/reset/:id', async (req, res) => {
         res.json({ message: "Reset complete" });
     } catch (err) {
         res.status(500).json({ error: "Reset failed" });
+    }
+});
+
+// DISTRIBUTE batches
+// POST: Randomly assign students to batches
+app.post('/api/exams/distribute-batches/:id', async (req, res) => {
+    try {
+        const examId = req.params.id;
+        const exam = await ExamConfig.findById(examId);
+        if (!exam) return res.status(404).json({ error: "Exam not found" });
+
+        const studentRegs = exam.assignedStudents;
+        const batches = exam.batchSettings;
+
+        if (!batches || batches.length === 0) {
+            return res.status(400).json({ error: "No batches defined for this exam." });
+        }
+
+        // 1. Clear previous allocations for THIS specific exam to avoid duplicates
+        await User.updateMany(
+            { regNo: { $in: studentRegs } },
+            { $pull: { examAllocations: { examId: exam._id } } }
+        );
+
+        // 2. Shuffle students (Fisher-Yates)
+        const shuffled = [...studentRegs];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+
+        // 3. Divide into batches
+        const studentsPerBatch = Math.ceil(shuffled.length / batches.length);
+        const updatePromises = shuffled.map((regNo, index) => {
+            const batchIdx = Math.floor(index / studentsPerBatch);
+            const b = batches[batchIdx];
+
+            return User.findOneAndUpdate(
+                { regNo: regNo },
+                { 
+                    $push: { 
+                        examAllocations: {
+                            examId: exam._id,
+                            title: exam.title,
+                            batchNumber: b.batchNumber,
+                            startTime: b.startTime,
+                            endTime: b.endTime
+                        } 
+                    } 
+                }
+            );
+        });
+
+        await Promise.all(updatePromises);
+        res.json({ message: "Distribution successful", count: shuffled.length, batches: batches.length });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// EMAIL EXAM SCHEDULING
+
+// Helper for Throttling
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// POST: Send Exam Slips via Email
+app.post('/api/exams/notify-students/:id', async (req, res) => {
+    try {
+        const examId = req.params.id;
+        const exam = await ExamConfig.findById(examId);
+        
+        // Find users who have an allocation for this exam
+        const users = await User.find({ "examAllocations.examId": examId });
+
+        if (users.length === 0) {
+            return res.status(400).json({ error: "No students allocated. Run Shuffle first." });
+        }
+
+        // Respond immediately so Admin UI doesn't hang
+        res.json({ message: `Dispatching emails to ${users.length} students...` });
+
+        // Background loop
+        for (const user of users) {
+            const alloc = user.examAllocations.find(a => a.examId.toString() === examId);
+
+            if (alloc && user.email) {
+                try {
+                    await transporter.sendMail({
+                        from: '"THE MATH WORKSHOP" <themathworkshop@gmail.com>',
+                        to: user.email,
+                        subject: `Exam Schedule: ${exam.title}`,
+                        html: `
+                            <div style="font-family: Arial, sans-serif; max-width: 500px; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
+                                <h2 style="color: #2563eb;">Exam Notification</h2>
+                                <p>Hello <b>${user.firstName}</b>,</p>
+                                <p>Your schedule for <b>${exam.title}</b> is ready:</p>
+                                <div style="background: #f8fafc; padding: 15px; border-radius: 5px;">
+                                    <b>Reg No:</b> ${user.regNo}<br>
+                                    <b>Password:</b> <span style="color: #dc2626; font-weight: bold;">${user.password}</span><br>
+                                    <hr style="border: 0; border-top: 1px solid #ddd; margin: 10px 0;">
+                                    <b>Batch:</b> ${alloc.batchNumber}<br>
+                                    <b>Start:</b> ${new Date(alloc.startTime).toLocaleString()}<br>
+                                    <b>End:</b> ${new Date(alloc.endTime).toLocaleString()}
+                                </div>
+                                <p style="font-size: 0.8rem; color: #64748b; margin-top: 15px;">
+                                    Login at the scheduled time. Your results will be available after the window closes.
+                                </p>
+                            </div>
+                        `
+                    });
+                    console.log(`Sent to ${user.regNo}`);
+                    await delay(3000); // 3 second pause
+                } catch (e) {
+                    console.error(`Mail failed for ${user.regNo}`);
+                }
+            }
+        }
+        // Update last notified timestamp
+        await ExamConfig.findByIdAndUpdate(examId, { lastNotifiedAt: new Date() });
+    } catch (err) {
+        console.error("Critical Notify Error:", err);
     }
 });
 

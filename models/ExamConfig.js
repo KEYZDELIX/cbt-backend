@@ -25,6 +25,7 @@ const examConfigSchema = new mongoose.Schema({
     assignedStudents: [String],
     totalQuestions: Number,
     assignmentType: String,
+    lastNotifiedAt: Date
 }, { timestamps: true }); // This automatically adds createdAt and updatedAt
 
 module.exports = mongoose.model('ExamConfig', examConfigSchema);

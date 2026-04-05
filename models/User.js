@@ -68,6 +68,14 @@ const UserSchema = new mongoose.Schema({
     type: String,
     default: 'student'
   },
+  examAllocations: [{
+    examId: mongoose.Schema.Types.ObjectId,
+    title: String,
+    batchNumber: Number,
+    startTime: Date,
+    endTime: Date,
+    hasTaken: { type: Boolean, default: false }
+  }],
   isLoggedIn: { 
     type: Boolean, 
     default: false 
