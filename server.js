@@ -626,34 +626,45 @@ app.post('/api/exams/reset/:id', async (req, res) => {
     }
 });
 
-// 1. Fetch Students by Class (Group Add)
-app.get('/api/students/by-group', async (req, res) => {
-    try {
-        const { class: className } = req.query;
-        // Assuming your Student model has a 'class' and 'regNo' field
-        const students = await Student.find({ class: className }).select('regNo');
-        const regNumbers = students.map(s => s.regNo);
-        res.json(regNumbers);
-    } catch (err) {
-        res.status(500).json({ error: "Failed to fetch class" });
-    }
-});
-
-// 2. Search Students (Individual Add)
+// SEARCH USERS (First, Middle, Last)
 app.get('/api/students/search', async (req, res) => {
     try {
         const q = req.query.q;
-        const students = await Student.find({
+        const users = await User.find({
             $or: [
-                { name: { $regex: q, $options: 'i' } },
+                { firstName: { $regex: q, $options: 'i' } },
+                { middleName: { $regex: q, $options: 'i' } },
+                { lastName: { $regex: q, $options: 'i' } },
                 { regNo: { $regex: q, $options: 'i' } }
             ]
         }).limit(10);
-        res.json(students);
+
+        // Format the names for the frontend dropdown
+        const formattedUsers = users.map(u => ({
+            regNo: u.regNo,
+            fullName: `${u.firstName} ${u.lastName}`,
+            classLevel: u.classLevel
+        }));
+
+        res.json(formattedUsers);
     } catch (err) {
-        res.status(500).json({ error: "Search failed" });
+        res.status(500).json([]);
     }
 });
+
+// GROUP USERS (Using classLevel)
+app.get('/api/students/by-group', async (req, res) => {
+    try {
+        const selectedLevel = req.query.class; // This comes from your dropdown
+        const users = await User.find({ classLevel: selectedLevel }).select('regNo');
+        const regNumbers = users.map(u => u.regNo);
+        res.json(regNumbers);
+    } catch (err) {
+        res.status(500).json([]);
+    }
+});
+
+
 
 //Reset UserExamSession
 app.post('/api/exams/reset/:id', async (req, res) => {
