@@ -6,6 +6,7 @@ const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const nodemailer = require('nodemailer');
 
 // 1. Configure Cloudinary
 cloudinary.config({
@@ -27,6 +28,44 @@ const storage = new CloudinaryStorage({
     },
 });
 const upload = multer({ storage: storage });
+
+// Initialize Transporter using Environment Variables
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+});
+
+// Verification Check: This runs when the server starts
+transporter.verify((error, success) => {
+    if (error) {
+        console.log("❌ Email Connection Error:", error);
+    } else {
+        console.log("✅ Email Server is ready to send messages (Savvy Scholars)");
+    }
+});
+
+// GET: Check if the mailer is alive
+app.get('/api/test-email-connection', async (req, res) => {
+    try {
+        await transporter.verify();
+        res.json({ 
+            status: "Online", 
+            message: "Connected to Savvy Scholars Gmail Engine",
+            user: process.env.EMAIL_USER 
+        });
+    } catch (err) {
+        res.status(500).json({ 
+            status: "Offline", 
+            error: err.message 
+        });
+    }
+});
 
 // Models
 const Question = require('./models/Question');
