@@ -321,7 +321,8 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { regNumber, password } = req.body;
-        const user = await User.findOne({ regNumber: regNumber.toUpperCase(), password });
+        const user = await User.findOne({ regNumber: regNo.toUpperCase(),
+        password: plainPassword });
 
         if (!user) return res.status(401).json({ message: "Invalid Credentials" });
 
