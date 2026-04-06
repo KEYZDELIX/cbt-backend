@@ -356,7 +356,9 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 
-// 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---app.get('/fetch-questions/:examId', async (req, res) => {
+// 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
+
+app.get('/fetch-questions/:examId', async (req, res) => {
     try {
         const exam = await Exam.findById(req.params.examId).populate('configId');
         if (!exam) return res.status(404).json({ message: "Exam not found" });
