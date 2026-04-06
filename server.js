@@ -30,14 +30,16 @@ const storage = new CloudinaryStorage({
 const upload = multer({ storage: storage });
 
 // Initialize Transporter using Environment Variables
-
 const transporter = nodemailer.createTransport({
     service: 'gmail',
+    port: 587,
+    secure: false, // Must be false for 587
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
     }
 });
+
 
 // FORCE IPv4: Add this block right after your transporter definition
 const dns = require('dns');
@@ -755,12 +757,17 @@ app.post('/api/exams/distribute-batches/:id', async (req, res) => {
             const j = Math.floor(Math.random() * (i + 1));
             [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
         }
-
-        // 3. Divide into batches
+// 3. Divide into batches
+        const today = new Date().toISOString().split('T')[0]; // Gets "2026-04-06"
         const studentsPerBatch = Math.ceil(shuffled.length / batches.length);
+        
         const updatePromises = shuffled.map((regNo, index) => {
             const batchIdx = Math.floor(index / studentsPerBatch);
             const b = batches[batchIdx];
+
+            // Convert "21:04" string into a real Date object for today
+            const fullStart = new Date(`${today}T${b.startTime}:00`);
+            const fullEnd = new Date(`${today}T${b.endTime}:00`);
 
             return User.findOneAndUpdate(
                 { regNo: regNo },
@@ -770,8 +777,8 @@ app.post('/api/exams/distribute-batches/:id', async (req, res) => {
                             examId: exam._id,
                             title: exam.title,
                             batchNumber: b.batchNumber,
-                            startTime: b.startTime,
-                            endTime: b.endTime
+                            startTime: fullStart, // Now a Date object
+                            endTime: fullEnd      // Now a Date object
                         } 
                     } 
                 }

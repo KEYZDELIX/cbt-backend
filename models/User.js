@@ -69,7 +69,7 @@ const UserSchema = new mongoose.Schema({
     default: 'student'
   },
   examAllocations: [{
-    examId: mongoose.Schema.Types.ObjectId,
+    examId: {type: mongoose.Schema.Types.ObjectId, ref: 'exam'},
     title: String,
     batchNumber: Number,
     startTime: Date,
