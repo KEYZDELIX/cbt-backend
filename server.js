@@ -352,7 +352,7 @@ app.post('/api/auth/login', async (req, res) => {
             success: true,
             user: {
                 id: user._id,
-                name: `${user.firstName} ${user.lastName}`,
+                name: `${user.firstName} ${user.middleName} ${user.lastName}`,
                 regNo: user.regNumber,
                 subjects: user.subjectCombination
             },
