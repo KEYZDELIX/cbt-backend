@@ -50,22 +50,6 @@ transporter.verify((error, success) => {
     }
 });
 
-// GET: Check if the mailer is alive
-app.get('/api/test-email-connection', async (req, res) => {
-    try {
-        await transporter.verify();
-        res.json({ 
-            status: "Online", 
-            message: "Connected to Savvy Scholars Gmail Engine",
-            user: process.env.EMAIL_USER 
-        });
-    } catch (err) {
-        res.status(500).json({ 
-            status: "Offline", 
-            error: err.message 
-        });
-    }
-});
 
 // Models
 const Question = require('./models/Question');
@@ -83,6 +67,23 @@ app.use(express.json({ limit: '10mb' }));
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('🔥 MongoDB connected'))	
   .catch(err => console.error('❌ Connection error:', err));
+  
+  // GET: Check if the mailer is alive
+app.get('/api/test-email-connection', async (req, res) => {
+    try {
+        await transporter.verify();
+        res.json({ 
+            status: "Online", 
+            message: "Connected to Savvy Scholars Gmail Engine",
+            user: process.env.EMAIL_USER 
+        });
+    } catch (err) {
+        res.status(500).json({ 
+            status: "Offline", 
+            error: err.message 
+        });
+    }
+});
 
 // --- ADMIN ROUTES ---
 
