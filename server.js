@@ -30,14 +30,14 @@ const storage = new CloudinaryStorage({
 const upload = multer({ storage: storage });
 
 // Initialize Transporter using Environment Variables
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    host: 'smtp.gmail.com',
-    port: 10000,
-    secure: true,
+const transporter = nodemailer.createTransport({service: 'gmail',
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
+    },
+    // This forces Node to prefer IPv4 over IPv6
+    dnsLookup: (hostname, options, callback) => {
+        require('dns').lookup(hostname, { family: 4 }, callback);
     }
 });
 
