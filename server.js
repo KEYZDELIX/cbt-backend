@@ -319,13 +319,21 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
 
 
 app.post('/api/auth/login', async (req, res) => {
-    try {
+    try {// 1. Destructure exactly what the frontend sends
         const { regNumber, password } = req.body;
-        const user = await User.findOne({ regNumber: regNo.toUpperCase(),
-        password: plainPassword });
 
-        if (!user) return res.status(401).json({ message: "Invalid Credentials" });
+        // 2. Query using the CORRECT schema field names:
+        // Match 'regNo' (from schema) with 'regNumber' (from frontend)
+        // Match 'plainPassword' (from schema) with 'password' (from frontend)
+        const user = await User.findOne({ 
+            regNo: regNumber.trim().toUpperCase(), 
+            plainPassword: password.trim() 
+        });
 
+        if (!user) {
+            return res.status(401).json({ message: "Invalid Registration Number or PIN" });
+        }
+        
         // 1. Check for assigned exams in examAllocations
         const now = new Date();
         const currentAllocation = user.examAllocations.find(alloc => {
