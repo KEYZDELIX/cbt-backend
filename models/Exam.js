@@ -1,33 +1,21 @@
 const mongoose = require('mongoose');
-
 const ExamSchema = new mongoose.Schema({
-  userId: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User', 
-    required: true 
-  },
-  subjectCombination: [String], 
-  
-  // ADD THIS LINE BELOW
-  status: { type: String, default: 'active' }, // 'active' or 'submitted'
-
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  status: { type: String, default: 'active' }, // active, submitted
   responses: [{
-    questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Question' },
+    questionId: String,
+    selectedOptionKey: String,
     subject: String,
-    selectedOptionKey: { type: String, default: null },
-    isCorrect: { type: Boolean, default: false },
-    pointsEarned: { type: Number, default: 0 }
+    timestamp: { type: Date, default: Date.now }
   }],
-  attemptNumber: { type: Number, default: 1 },
-configId: { type: mongoose.Schema.Types.ObjectId, ref: 'ExamConfig' },
+  // TRACKING DATA
+  subjectAnalysis: [{
+    subjectName: String,
+    secondsSpent: { type: Number, default: 0 }
+  }],
+  totalSecondsRemaining: { type: Number }, // To resume timer exactly
   startTime: { type: Date, default: Date.now },
-  endTime: { type: Date },
-  timeLeft: { type: Number },
-  createdAt: { type: Date, default: Date.now },
-  timestamp: { type: Date, default: Date.now }
+  lastActive: { type: Date, default: Date.now }
 });
-
-
-
 
 module.exports = mongoose.model('Exam', ExamSchema);

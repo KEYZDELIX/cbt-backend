@@ -290,7 +290,7 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
 // --- EXAM & USER ROUTES ---
 
 // 3. Login Route (Fixed "Undefined" Error)
-app.post('/login', async (req, res) => {
+/** app.post('/login', async (req, res) => {
   try {
     const { regNumber, password } = req.body;
     const user = await User.findOne({ regNumber: regNumber.toUpperCase(), password });
@@ -315,40 +315,97 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
-app.get('/fetch-questions/:examId', async (req, res) => {
-  try {
-    const exam = await Exam.findById(req.params.examId).populate('configId');
-    if (!exam) return res.status(404).json({ message: "Exam not found" });
+**/
 
-    // Get the config settings
-    const shuffleQs = exam.configId ? exam.configId.shuffleQuestions : true;
-    const shuffleOpts = exam.configId ? exam.configId.shuffleOptions : true;
 
-    let examPaper = [];
-    for (let subject of exam.subjectCombination) {
-      const limit = (subject === "Use of English") ? 60 : 40;
-      
-      let qs = await Question.aggregate([
-        { $match: { subject: subject } },
-        { $sample: { size: limit } },
-        { $project: { correctOptionKey: 0 } } 
-      ]);
-    // Apply Shuffling
-      if (shuffleOpts) {
-        qs = qs.map(q => {
-          q.options = q.options.sort(() => Math.random() - 0.5);
-          return q;
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { regNumber, password } = req.body;
+        const user = await User.findOne({ regNumber: regNumber.toUpperCase(), password });
+
+        if (!user) return res.status(401).json({ message: "Invalid Credentials" });
+
+        // 1. Check for assigned exams in examAllocations
+        const now = new Date();
+        const currentAllocation = user.examAllocations.find(alloc => {
+            const start = new Date(alloc.startTime);
+            const end = new Date(alloc.endTime);
+            return now >= start && now <= end; 
         });
-      }
 
-      examPaper.push({ subject, questions: qs });
+        // 2. Check if they already have an unfinished session
+        const existingSession = await Exam.findOne({ 
+            userId: user._id, 
+            status: 'active' 
+        });
+
+        res.json({
+            success: true,
+            user: {
+                id: user._id,
+                name: `${user.firstName} ${user.lastName}`,
+                regNo: user.regNumber,
+                subjects: user.subjectCombination
+            },
+            allocation: currentAllocation || null,
+            resumeSessionId: existingSession ? existingSession._id : null
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    res.json(examPaper);
- } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
+
+
+// 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---app.get('/fetch-questions/:examId', async (req, res) => {
+    try {
+        const exam = await Exam.findById(req.params.examId).populate('configId');
+        if (!exam) return res.status(404).json({ message: "Exam not found" });
+
+        let examPaper = [];
+
+        for (let subjectName of exam.subjectCombination) {
+            let subjectQuestions = [];
+
+            if (subjectName === "Use of English") {
+                // 1. Fetch by Topics (as defined in your ExamConfig)
+                // Example: 10 Comprehension, 10 Sentence Completion, etc.
+                const topics = ["Comprehension", "Lexis", "Structure", "Oral Forms"];
+                
+                for (let topic of topics) {
+                    const limit = (topic === "Comprehension") ? 10 : 15; // Adjusted per topic
+                    const topicQs = await Question.aggregate([
+                        { $match: { subject: subjectName, topic: topic } },
+                        { $sample: { size: limit } }, // This ensures same pool for the batch if called once
+                        { $project: { correctOptionKey: 0 } }
+                    ]);
+                    subjectQuestions.push(...topicQs);
+                }
+            } else {
+                // 2. Standard Randomization for Math/Physics
+                subjectQuestions = await Question.aggregate([
+                    { $match: { subject: subjectName } },
+                    { $sample: { size: 40 } },
+                    { $project: { correctOptionKey: 0 } }
+                ]);
+            }
+
+            // Shuffle Options for every question
+            const finalizedQs = subjectQuestions.map(q => {
+                if (q.options && q.options.length > 0) {
+                    q.options = q.options.sort(() => Math.random() - 0.5);
+                }
+                return q;
+            });
+
+            examPaper.push({ subject: subjectName, questions: finalizedQs });
+        }
+
+        res.json(examPaper);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 
 app.post('/start-exam', async (req, res) => {
     const { userId } = req.body;
@@ -397,39 +454,39 @@ app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
   }
 });
 
-// 5. Save Answer (Live Persistence)
-app.post('/save-answer', async (req, res) => {
-  try {
-    const { examId, questionId, selectedOptionKey } = req.body;
+// 5. Save Answer (Live Persistence)app.post('/save-answer', async (req, res) => {
+    try {
+        const { examId, questionId, selectedOptionKey, subject, timeSpentOnSubject } = req.body;
 
-    const exam = await Exam.findById(examId);
-    const question = await Question.findById(questionId);
+        // Use atomic operators ($set and $inc) to reduce server load
+        await Exam.updateOne(
+            { _id: examId, "responses.questionId": questionId },
+            { 
+                $set: { "responses.$.selectedOptionKey": selectedOptionKey },
+                $set: { lastActive: new Date() }
+            }
+        ).then(async (result) => {
+            if (result.matchedCount === 0) {
+                // If answer doesn't exist, push new one
+                await Exam.updateOne(
+                    { _id: examId },
+                    { $push: { responses: { questionId, selectedOptionKey, subject } } }
+                );
+            }
+        });
 
-    const isCorrect = question.correctOptionKey === selectedOptionKey;
-    const points = isCorrect ? question.weight : 0;
+        // Update Subject Time Tracking
+        await Exam.updateOne(
+            { _id: examId, "subjectAnalysis.subjectName": subject },
+            { $inc: { "subjectAnalysis.$.secondsSpent": timeSpentOnSubject } }
+        );
 
-    const existingIndex = exam.responses.findIndex(r => r.questionId.toString() === questionId);
-
-    if (existingIndex > -1) {
-      exam.responses[existingIndex].selectedOptionKey = selectedOptionKey;
-      exam.responses[existingIndex].isCorrect = isCorrect;
-      exam.responses[existingIndex].pointsEarned = points;
-    } else {
-      exam.responses.push({
-        questionId,
-        subject: question.subject,
-        selectedOptionKey,
-        isCorrect,
-        pointsEarned: points
-      });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: "Silent Save Error" });
     }
-
-    await exam.save();
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
+
 
 // 6. Submit Exam & Generate Final Result
 app.post('/submit-exam', async (req, res) => {
