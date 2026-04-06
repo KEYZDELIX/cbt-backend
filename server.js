@@ -456,7 +456,9 @@ app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
   }
 });
 
-// 5. Save Answer (Live Persistence)app.post('/save-answer', async (req, res) => {
+// 5. Save Answer (Live Persistence)
+
+app.post('/save-answer', async (req, res) => {
     try {
         const { examId, questionId, selectedOptionKey, subject, timeSpentOnSubject } = req.body;
 
