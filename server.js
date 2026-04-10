@@ -347,18 +347,20 @@ app.post('/api/auth/login', async (req, res) => {
             userId: user._id, 
             status: 'active' 
         });
-
-        res.json({
-            success: true,
-            user: {
-                id: user._id,
-                name: `${user.firstName} ${user.middleName} ${user.lastName}`,
-                regNo: user.regNumber,
-                subjects: user.subjectCombination
-            },
-            allocation: currentAllocation || null,
-            resumeSessionId: existingSession ? existingSession._id : null
-        });
+res.json({
+    success: true,
+    user: {
+        _id: user._id,
+        firstName: user.firstName,   // Send these individually
+        middleName: user.middleName, // so the frontend can
+        lastName: user.lastName,     // destructure them
+        regNo: user.regNo,           // Match this to user.regNo
+        subjectCombination: user.subjectCombination
+    },
+    allocation: currentAllocation || null,
+    resumeSessionId: existingSession ? existingSession._id : null
+});
+        
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
