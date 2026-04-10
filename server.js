@@ -370,7 +370,9 @@ res.json({
 // 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
 // --- server.js ---
 
-// 1. Helper function for English (Point 1, 2, 3 logic)async function getEnglishPaper(batchId) {
+// 1. Helper function for English (Point 1, 2, 3 logic)
+
+async function getEnglishPaper(batchId) {
     // Definitive JAMB Sections from your screenshots
     const sections = [
         { topic: "Section A: Comprehension/Summary", subtopic: "Comprehension Passages", count: 5, isPassage: true },
