@@ -368,7 +368,8 @@ res.json({
 
 
 // 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
-// --- server.js ---async function getEnglishPaper(batchId) {
+// --- server.js ---
+async function getEnglishPaper(batchId) {
     const paper = [];
     const sections = [
         { topic: "Section A: Comprehension/Summary", subtopic: "Comprehension Passages", count: 5, isPassage: true },
