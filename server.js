@@ -368,56 +368,102 @@ res.json({
 
 
 // 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
+// --- server.js ---
 
-app.get('/fetch-questions/:examId', async (req, res) => {
+// 1. Helper function for English (Point 1, 2, 3 logic)async function getEnglishPaper(batchId) {
+    // Definitive JAMB Sections from your screenshots
+    const sections = [
+        { topic: "Section A: Comprehension/Summary", subtopic: "Comprehension Passages", count: 5, isPassage: true },
+        { topic: "Section A: Comprehension/Summary", subtopic: "Cloze Passage", count: 10, isPassage: true },
+        { topic: "Section A: Comprehension/Summary", subtopic: "Reading Text", count: 10 },
+        { topic: "Section B: Lexis & Structure", subtopic: "Sentence Interpretation", count: 10 },
+        { topic: "Section B: Lexis & Structure", subtopic: "Antonyms", count: 5 },
+        { topic: "Section B: Lexis & Structure", subtopic: "Synonyms", count: 5 },
+        { topic: "Section B: Lexis & Structure", subtopic: "Sentence Completion", count: 5 },
+        { topic: "Section C: Oral Forms", subtopic: "Oral Forms", count: 10, isStratified: true }
+    ];
+
+    let paper = [];
+
+    for (const sec of sections) {
+        if (sec.isPassage) {
+            // Pick ONE passage (subsubtopic) for the whole batch
+            const passageGroup = await Question.aggregate([
+                { $match: { topic: sec.topic, subtopic: sec.subtopic } },
+                { $group: { _id: "$subsubtopic", questions: { $push: "$$ROOT" } } },
+                { $sample: { size: 1 } } 
+            ]);
+            if (passageGroup.length > 0) paper.push(...passageGroup[0].questions.slice(0, sec.count));
+
+        } else if (sec.isStratified) {
+            // Stratify Oral Forms by 'Type' (Vowels, Consonants, Stress, etc.)
+            const types = await Question.distinct("subsubtopic", { subtopic: "Oral Forms" });
+            let oralQs = [];
+            for (let t of types) {
+                const q = await Question.aggregate([
+                    { $match: { subtopic: "Oral Forms", subsubtopic: t } },
+                    { $sample: { size: 1 } }
+                ]);
+                if (q.length > 0) oralQs.push(q[0]);
+            }
+            // Fill to reach the count
+            if (oralQs.length < sec.count) {
+                const fillers = await Question.aggregate([
+                    { $match: { subtopic: "Oral Forms", _id: { $nin: oralQs.map(x => x._id) } } },
+                    { $sample: { size: sec.count - oralQs.length } }
+                ]);
+                oralQs.push(...fillers);
+            }
+            paper.push(...oralQs);
+        } else {
+            // General Lexis topics
+            const qs = await Question.aggregate([
+                { $match: { topic: sec.topic, subtopic: sec.subtopic } },
+                { $sample: { size: sec.count } }
+            ]);
+            paper.push(...qs);
+        }
+    }
+    return paper;
+}
+
+
+// 2. The Main Route that uses it
+app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
     try {
-        const exam = await Exam.findById(req.params.examId).populate('configId');
-        if (!exam) return res.status(404).json({ message: "Exam not found" });
-
+        const exam = await Exam.findById(req.params.examId).populate('userId');
+        const subjects = exam.subjectCombination; 
         let examPaper = [];
 
-        for (let subjectName of exam.subjectCombination) {
-            let subjectQuestions = [];
-
-            if (subjectName === "Use of English") {
-                // 1. Fetch by Topics (as defined in your ExamConfig)
-                // Example: 10 Comprehension, 10 Sentence Completion, etc.
-                const topics = ["Comprehension", "Lexis", "Structure", "Oral Forms"];
-                
-                for (let topic of topics) {
-                    const limit = (topic === "Comprehension") ? 10 : 15; // Adjusted per topic
-                    const topicQs = await Question.aggregate([
-                        { $match: { subject: subjectName, topic: topic } },
-                        { $sample: { size: limit } }, // This ensures same pool for the batch if called once
-                        { $project: { correctOptionKey: 0 } }
-                    ]);
-                    subjectQuestions.push(...topicQs);
-                }
+        for (const sub of subjects) {
+            let questions;
+            if (sub === "Use of English") {
+                questions = await getEnglishPaper(exam.batchId);
             } else {
-                // 2. Standard Randomization for Math/Physics
-                subjectQuestions = await Question.aggregate([
-                    { $match: { subject: subjectName } },
-                    { $sample: { size: 40 } },
-                    { $project: { correctOptionKey: 0 } }
+                // Generate a consistent pool for other subjects based on Batch
+                // We fetch 100 questions per subject for the batch to draw from
+                questions = await Question.aggregate([
+                    { $match: { subject: sub } },
+                    { $sample: { size: 100 } } 
                 ]);
+                // Each student takes 40 from this 100-question batch pool
+                questions = questions.sort(() => 0.5 - Math.random()).slice(0, 40);
             }
 
-            // Shuffle Options for every question
-            const finalizedQs = subjectQuestions.map(q => {
-                if (q.options && q.options.length > 0) {
-                    q.options = q.options.sort(() => Math.random() - 0.5);
-                }
-                return q;
+            examPaper.push({
+                subject: sub,
+                questions: questions.map(q => ({
+                    ...q,
+                    options: q.options.sort(() => 0.5 - Math.random()) // Shuffle options
+                }))
             });
-
-            examPaper.push({ subject: subjectName, questions: finalizedQs });
         }
-
         res.json(examPaper);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 
 app.post('/start-exam', async (req, res) => {
