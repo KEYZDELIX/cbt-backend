@@ -368,49 +368,61 @@ res.json({
 
 
 // 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
-// --- server.js ---
-
-// 1. Helper function for English (Point 1, 2, 3 logic)
-
-// Helper for English Sections (Point 1, 2, & 3)
-async function getEnglishPaper() {
+// --- server.js ---async function getEnglishPaper(batchId) {
     const paper = [];
     const sections = [
-        { topic: "Section A: Comprehension/Summary", subtopic: "Comprehension Passages", count: 10, isPassage: true },
+        { topic: "Section A: Comprehension/Summary", subtopic: "Comprehension Passages", count: 5, isPassage: true },
         { topic: "Section A: Comprehension/Summary", subtopic: "Cloze Passage", count: 10, isPassage: true },
         { topic: "Section A: Comprehension/Summary", subtopic: "Reading Text", count: 10 },
         { topic: "Section B: Lexis Structure", subtopic: "Sentence Interpretation", count: 5 },
         { topic: "Section B: Lexis Structure", subtopic: "Antonyms", count: 5 },
-        { topic: "Section B: Lexis Structure", subtopic: "Synonyms", count: 10 },
-        { topic: "Section B: Lexis Structure", subtopic: "Sentence Completion", count: 5 },
-        { topic: "Section C: Oral Forms", subtopic: "Oral Forms", count: 5, isOral: true }
+        { topic: "Section B: Lexis Structure", subtopic: "Synonyms", count: 5 },
+        { topic: "Section B: Lexis Structure", subtopic: "Sentence Completion", count: 10 },
+        { topic: "Section C: Oral Forms", subtopic: "Oral Forms", count: 10, isOral: true }
     ];
 
     for (const sec of sections) {
-        if (sec.isPassage) {
-            // Pick ONE passage (subsubtopic) for the batch
-            const passage = await Question.aggregate([
-                { $match: { topic: sec.topic, subtopic: sec.subtopic } },
-                { $group: { _id: "$subsubtopic", qs: { $push: "$$ROOT" } } },
-                { $sample: { size: 1 } }
-            ]);
-            if (passage.length) paper.push(...passage[0].qs.slice(0, sec.count));
-        } else if (sec.isOral) {
-            // Ensure 1 from each Type (Vowels, Rhymes, etc.)
-            const types = await Question.distinct("subsubtopic", { subtopic: "Oral Forms" });
-            for (let t of types) {
-                const q = await Question.aggregate([{ $match: { subsubtopic: t } }, { $sample: { size: 1 } }]);
-                if (q.length) paper.push(q[0]);
+        try {
+            if (sec.isPassage) {
+                // Pick one passage 'Group' for the whole batch
+                const passage = await Question.aggregate([
+                    { $match: { topic: sec.topic, subtopic: sec.subtopic } },
+                    { $group: { _id: "$subsubtopic", qs: { $push: "$$ROOT" } } },
+                    { $sample: { size: 1 } }
+                ]);
+                if (passage.length > 0) paper.push(...passage[0].qs.slice(0, sec.count));
+            } else if (sec.isOral) {
+                // Stratify: Get 1 from each Type (Vowels, Consonants, etc.)
+                const types = await Question.distinct("subsubtopic", { subtopic: "Oral Forms" });
+                let oralCount = 0;
+                for (let t of types) {
+                    if (oralCount >= sec.count) break;
+                    const q = await Question.aggregate([{ $match: { subsubtopic: t } }, { $sample: { size: 1 } }]);
+                    if (q.length > 0) { paper.push(q[0]); oralCount++; }
+                }
+                // Fill if types < 10
+                if (oralCount < sec.count) {
+                    const fillers = await Question.aggregate([
+                        { $match: { subtopic: "Oral Forms", _id: { $nin: paper.map(p => p._id) } } },
+                        { $sample: { size: sec.count - oralCount } }
+                    ]);
+                    paper.push(...fillers);
+                }
+            } else {
+                // Standard Lexis topics
+                const qs = await Question.aggregate([
+                    { $match: { topic: sec.topic, subtopic: sec.subtopic } },
+                    { $sample: { size: sec.count } }
+                ]);
+                paper.push(...qs);
             }
-            // Fill remaining to reach 10
-            if (paper.length < 60) { /* fill logic */ }
-        } else {
-            const qs = await Question.aggregate([{ $match: { subtopic: sec.subtopic } }, { $sample: { size: sec.count } }]);
-            paper.push(...qs);
+        } catch (e) {
+            console.error(`Error in section ${sec.subtopic}:`, e);
         }
     }
     return paper;
 }
+
 
 // The API Route
 app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
@@ -420,22 +432,32 @@ app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
 
         const results = [];
         for (const sub of exam.subjectCombination) {
-            let questions = (sub === "Use of English") 
-                ? await getEnglishPaper() 
-                : await Question.aggregate([{ $match: { subject: sub } }, { $sample: { size: 40 } }]);
+            let questions;
+            
+            if (sub === "Use of English") {
+                questions = await getEnglishPaper(exam.batchId);
+            } else {
+                // DISTINCT POOL PER BATCH: Pull 100 randoms for the batch pool
+                // Then pick 40 for this specific student
+                const batchPool = await Question.aggregate([
+                    { $match: { subject: sub } },
+                    { $sample: { size: 100 } } 
+                ]);
+                questions = batchPool.sort(() => 0.5 - Math.random()).slice(0, 40);
+            }
 
             results.push({
                 subject: sub,
                 questions: questions.map(q => ({
-                    ...q._doc,
-                    options: q.options.sort(() => 0.5 - Math.random()) // Randomize choices
+                    ...q,
+                    options: q.options.sort(() => 0.5 - Math.random()) // Per-student shuffle
                 }))
             });
         }
-        res.json(results); // Send clean JSON
+        res.json(results);
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Internal Server Error" });
+        console.error("SERVER CRASH:", err);
+        res.status(500).send(err.message); // Sends the raw error so you can see it in Console
     }
 });
 
