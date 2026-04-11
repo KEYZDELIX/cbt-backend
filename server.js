@@ -450,19 +450,30 @@ app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
 });
 
 
-app.post('/start-exam', async (req, res) => {
-    const { userId } = req.body;
-    const user = await User.findById(userId);
-    
-    const newExam = new Exam({
-        userId: user._id,
-        subjectCombination: user.subjectCombination,
-        status: 'active',
-        startTime: new Date()
-    });
-    
-    await newExam.save();
-    res.json({ examId: newExam._id });
+app.post('/api/exams/start-exam', async (req, res) => {
+    try {
+        const { userId } = req.body;
+        
+        // 1. Check if an active session already exists for this user
+        let exam = await Exam.findOne({ userId, status: 'active' });
+        
+        if (!exam) {
+            // 2. If not, create a new one
+            const user = await User.findById(userId);
+            exam = new Exam({
+                userId,
+                subjectCombination: user.subjectCombination,
+                startTime: new Date(),
+                status: 'active',
+                answers: {}
+            });
+            await exam.save();
+        }
+
+        res.json({ examId: exam._id });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
