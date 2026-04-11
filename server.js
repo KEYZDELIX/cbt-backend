@@ -331,14 +331,17 @@ app.post('/api/auth/login', async (req, res) => {
         if (!user) {
             return res.status(401).json({ message: "Invalid Registration Number or PIN" });
         }
-        
-        // Find active exam allocation for TODAY
-        const now = new Date();
-        const currentAllocation = user.examAllocations.find(alloc => {
-            const start = new Date(alloc.startTime);
-            const end = new Date(alloc.endTime);
-            return now >= start && now <= end; 
-        });
+        // Find active exam allocation (With 30-minute grace period)
+const now = new Date();
+const gracePeriod = 30 * 60 * 1000; // 30 minutes in milliseconds
+
+const currentAllocation = user.examAllocations.find(alloc => {
+    const start = new Date(alloc.startTime).getTime() - gracePeriod;
+    const end = new Date(alloc.endTime).getTime() + gracePeriod;
+    const currentTime = now.getTime();
+    
+    return currentTime >= start && currentTime <= end;
+});
 
         // Check for an existing session to resume
         const existingSession = await Exam.findOne({ 
@@ -369,7 +372,6 @@ app.post('/api/auth/login', async (req, res) => {
 
 
 // 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
-// --- FIXED server.js ---
 
 async function getEnglishPaper(batchId) {
     const paper = [];
