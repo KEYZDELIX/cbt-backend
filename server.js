@@ -368,24 +368,24 @@ res.json({
 
 
 // 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
-// --- server.js ---
+// --- FIXED server.js ---
+
 async function getEnglishPaper(batchId) {
     const paper = [];
     const sections = [
-        { topic: "Section A: Comprehension/Summary", subtopic: "Comprehension Passages", count: 5, isPassage: true },
+        { topic: "Section A: Comprehension/Summary", subtopic: "Comprehension Passages", count: 10, isPassage: true },
         { topic: "Section A: Comprehension/Summary", subtopic: "Cloze Passage", count: 10, isPassage: true },
         { topic: "Section A: Comprehension/Summary", subtopic: "Reading Text", count: 10 },
         { topic: "Section B: Lexis Structure", subtopic: "Sentence Interpretation", count: 5 },
         { topic: "Section B: Lexis Structure", subtopic: "Antonyms", count: 5 },
-        { topic: "Section B: Lexis Structure", subtopic: "Synonyms", count: 5 },
-        { topic: "Section B: Lexis Structure", subtopic: "Sentence Completion", count: 10 },
-        { topic: "Section C: Oral Forms", subtopic: "Oral Forms", count: 10, isOral: true }
+        { topic: "Section B: Lexis Structure", subtopic: "Synonyms", count: 10 },
+        { topic: "Section B: Lexis Structure", subtopic: "Sentence Completion", count: 5 },
+        { topic: "Section C: Oral Forms", subtopic: "Oral Forms", count: 5, isOral: true }
     ];
 
     for (const sec of sections) {
         try {
             if (sec.isPassage) {
-                // Pick one passage 'Group' for the whole batch
                 const passage = await Question.aggregate([
                     { $match: { topic: sec.topic, subtopic: sec.subtopic } },
                     { $group: { _id: "$subsubtopic", qs: { $push: "$$ROOT" } } },
@@ -393,24 +393,15 @@ async function getEnglishPaper(batchId) {
                 ]);
                 if (passage.length > 0) paper.push(...passage[0].qs.slice(0, sec.count));
             } else if (sec.isOral) {
-                // Stratify: Get 1 from each Type (Vowels, Consonants, etc.)
+                // Use the correct field name 'subsubtopic' for Types (Vowels, etc)
                 const types = await Question.distinct("subsubtopic", { subtopic: "Oral Forms" });
-                let oralCount = 0;
+                let gathered = [];
                 for (let t of types) {
-                    if (oralCount >= sec.count) break;
                     const q = await Question.aggregate([{ $match: { subsubtopic: t } }, { $sample: { size: 1 } }]);
-                    if (q.length > 0) { paper.push(q[0]); oralCount++; }
+                    if (q.length > 0) gathered.push(q[0]);
                 }
-                // Fill if types < 10
-                if (oralCount < sec.count) {
-                    const fillers = await Question.aggregate([
-                        { $match: { subtopic: "Oral Forms", _id: { $nin: paper.map(p => p._id) } } },
-                        { $sample: { size: sec.count - oralCount } }
-                    ]);
-                    paper.push(...fillers);
-                }
+                paper.push(...gathered.slice(0, sec.count));
             } else {
-                // Standard Lexis topics
                 const qs = await Question.aggregate([
                     { $match: { topic: sec.topic, subtopic: sec.subtopic } },
                     { $sample: { size: sec.count } }
@@ -418,50 +409,42 @@ async function getEnglishPaper(batchId) {
                 paper.push(...qs);
             }
         } catch (e) {
-            console.error(`Error in section ${sec.subtopic}:`, e);
+            console.error(`Error in English Section ${sec.subtopic}:`, e.message);
         }
     }
     return paper;
 }
 
-
-// The API Route
 app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
     try {
         const exam = await Exam.findById(req.params.examId);
-        if (!exam) return res.status(404).json({ error: "Exam not found" });
+        if (!exam) return res.status(404).json({ error: "Exam session not found" });
 
         const results = [];
         for (const sub of exam.subjectCombination) {
-            let questions;
-            
+            let questions = [];
             if (sub === "Use of English") {
                 questions = await getEnglishPaper(exam.batchId);
             } else {
-                // DISTINCT POOL PER BATCH: Pull 100 randoms for the batch pool
-                // Then pick 40 for this specific student
-                const batchPool = await Question.aggregate([
-                    { $match: { subject: sub } },
-                    { $sample: { size: 100 } } 
-                ]);
-                questions = batchPool.sort(() => 0.5 - Math.random()).slice(0, 40);
+                // Pull from batch pool
+                const pool = await Question.aggregate([{ $match: { subject: sub } }, { $sample: { size: 60 } }]);
+                questions = pool.sort(() => 0.5 - Math.random()).slice(0, 40);
             }
 
             results.push({
                 subject: sub,
                 questions: questions.map(q => ({
                     ...q,
-                    options: q.options.sort(() => 0.5 - Math.random()) // Per-student shuffle
+                    options: q.options ? [...q.options].sort(() => 0.5 - Math.random()) : []
                 }))
             });
         }
         res.json(results);
     } catch (err) {
-        console.error("SERVER CRASH:", err);
-        res.status(500).send(err.message); // Sends the raw error so you can see it in Console
+        console.error("CRITICAL SERVER ERROR:", err);
+        res.status(500).json({ error: err.message });
     }
 });
-
 
 
 app.post('/start-exam', async (req, res) => {
