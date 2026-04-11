@@ -425,23 +425,26 @@ async function getEnglishPaper(batchId) {
 
 app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
     try {
-        const { examId } = req.params;
+      const { examId } = req.params;
+        const exam = await Exam.findById(examId).populate('userId');
         
-        // Safety: If examId is a string "null" or missing
-        if (!examId || examId === "null") {
-            return res.status(400).json({ error: "Invalid Exam ID" });
-        }
+        if (!exam) return res.status(404).json({ error: "Exam session not found" });
 
-        const exam = await Exam.findById(examId);
-        if (!exam) return res.status(404).json({ error: "Session not found" });
+        // If exam has no subjects, look at the user record
+        let subjects = exam.subjectCombination;
+        if (!subjects || subjects.length === 0) {
+            subjects = exam.userId.subjectCombination;
+        }
+        
 
         const results = [];
-        for (const sub of exam.subjectCombination) {
+        for (const sub of subjects) {
             let questions = [];
             if (sub === "Use of English") {
+                // Fetch the special 60 questions for English
                 questions = await getEnglishPaper(exam.batchId);
             } else {
-                // Normal subjects
+                // Fetch 40 questions for Math, Physics, etc.
                 questions = await Question.aggregate([
                     { $match: { subject: sub } },
                     { $sample: { size: 40 } }
@@ -459,7 +462,7 @@ app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
         res.json(results);
     } catch (err) {
         console.error("Fetch Questions Error:", err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Server failed to load subjects: " + err.message });
     }
 });
 
@@ -467,19 +470,18 @@ app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
 app.post('/api/exams/start-exam', async (req, res) => {
     try {
         const { userId } = req.body;
-        
-        // 1. Check if an active session already exists for this user
         let exam = await Exam.findOne({ userId, status: 'active' });
-        
+
         if (!exam) {
-            // 2. If not, create a new one
             const user = await User.findById(userId);
+            if (!user) return res.status(404).json({ error: "User not found" });
+
             exam = new Exam({
-                userId,
-                subjectCombination: user.subjectCombination,
-                startTime: new Date(),
+                userId: user._id,
+                // SAVE THE SUBJECTS HERE
+                subjectCombination: user.subjectCombination, 
                 status: 'active',
-                answers: {}
+                startTime: new Date()
             });
             await exam.save();
         }
