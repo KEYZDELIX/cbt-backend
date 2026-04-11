@@ -319,12 +319,10 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
 
 
 app.post('/api/auth/login', async (req, res) => {
-    try {// 1. Destructure exactly what the frontend sends
+    try {
         const { regNumber, password } = req.body;
 
-        // 2. Query using the CORRECT schema field names:
-        // Match 'regNo' (from schema) with 'regNumber' (from frontend)
-        // Match 'plainPassword' (from schema) with 'password' (from frontend)
+        // Ensure we are querying the correct field: 'regNo' and 'plainPassword'
         const user = await User.findOne({ 
             regNo: regNumber.trim().toUpperCase(), 
             plainPassword: password.trim() 
@@ -334,7 +332,7 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(401).json({ message: "Invalid Registration Number or PIN" });
         }
         
-        // 1. Check for assigned exams in examAllocations
+        // Find active exam allocation for TODAY
         const now = new Date();
         const currentAllocation = user.examAllocations.find(alloc => {
             const start = new Date(alloc.startTime);
@@ -342,27 +340,30 @@ app.post('/api/auth/login', async (req, res) => {
             return now >= start && now <= end; 
         });
 
-        // 2. Check if they already have an unfinished session
+        // Check for an existing session to resume
         const existingSession = await Exam.findOne({ 
             userId: user._id, 
             status: 'active' 
         });
-res.json({
-    success: true,
-    user: {
-        _id: user._id,
-        firstName: user.firstName,   // Send these individually
-        middleName: user.middleName, // so the frontend can
-        lastName: user.lastName,     // destructure them
-        regNo: user.regNo,           // Match this to user.regNo
-        subjectCombination: user.subjectCombination
-    },
-    allocation: currentAllocation || null,
-    resumeSessionId: existingSession ? existingSession._id : null
-});
+
+        // Send a clean object back to the frontend
+        res.json({
+            success: true,
+            user: {
+                _id: user._id,
+                firstName: user.firstName,
+                middleName: user.middleName || "",
+                lastName: user.lastName,
+                regNo: user.regNo,
+                subjectCombination: user.subjectCombination
+            },
+            allocation: currentAllocation || null,
+            resumeSessionId: existingSession ? existingSession._id : null
+        });
         
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error("Login Error:", err);
+        res.status(500).json({ message: "Internal Server Error: " + err.message });
     }
 });
 
