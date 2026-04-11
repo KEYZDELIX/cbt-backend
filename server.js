@@ -376,19 +376,20 @@ const currentAllocation = user.examAllocations.find(alloc => {
 async function getEnglishPaper(batchId) {
     const paper = [];
     const sections = [
-        { topic: "Section A: Comprehension/Summary", subtopic: "Comprehension Passages", count: 10, isPassage: true },
-        { topic: "Section A: Comprehension/Summary", subtopic: "Cloze Passage", count: 10, isPassage: true },
-        { topic: "Section A: Comprehension/Summary", subtopic: "Reading Text", count: 10 },
-        { topic: "Section B: Lexis Structure", subtopic: "Sentence Interpretation", count: 5 },
-        { topic: "Section B: Lexis Structure", subtopic: "Antonyms", count: 5 },
-        { topic: "Section B: Lexis Structure", subtopic: "Synonyms", count: 10 },
-        { topic: "Section B: Lexis Structure", subtopic: "Sentence Completion", count: 5 },
-        { topic: "Section C: Oral Forms", subtopic: "Oral Forms", count: 5, isOral: true }
+        { topic: "Section A: Comprehension and Summary", subtopic: "Comprehension Passage", count: 5, isPassage: true },
+        { topic: "Section A: Comprehension and Summary", subtopic: "Cloze Passage", count: 10, isPassage: true },
+        { topic: "Section A: Comprehension and Summary", subtopic: "Reading Text", count: 10 },
+        { topic: "Section B: Lexis and Structure", subtopic: "Sentence Interpretation", count: 5 },
+        { topic: "Section B: Lexis and Structure", subtopic: "Antonyms", count: 5 },
+        { topic: "Section B: Lexis and Structure", subtopic: "Synonyms", count: 5 },
+        { topic: "Section B: Lexis and Structure", subtopic: "Sentence Completion", count: 10 },
+        { topic: "Section C: Oral Forms", subtopic: "Oral Forms", count: 10, isOral: true }
     ];
 
     for (const sec of sections) {
         try {
             if (sec.isPassage) {
+                // Try to find a passage group
                 const passage = await Question.aggregate([
                     { $match: { topic: sec.topic, subtopic: sec.subtopic } },
                     { $group: { _id: "$subsubtopic", qs: { $push: "$$ROOT" } } },
@@ -396,23 +397,27 @@ async function getEnglishPaper(batchId) {
                 ]);
                 if (passage.length > 0) paper.push(...passage[0].qs.slice(0, sec.count));
             } else if (sec.isOral) {
-                // Use the correct field name 'subsubtopic' for Types (Vowels, etc)
+                // Pick by 'subsubtopic' (Types like Rhymes, Vowels)
                 const types = await Question.distinct("subsubtopic", { subtopic: "Oral Forms" });
-                let gathered = [];
                 for (let t of types) {
-                    const q = await Question.aggregate([{ $match: { subsubtopic: t } }, { $sample: { size: 1 } }]);
-                    if (q.length > 0) gathered.push(q[0]);
+                    const q = await Question.aggregate([
+                        { $match: { subtopic: "Oral Forms", subsubtopic: t } }, 
+                        { $sample: { size: 1 } }
+                    ]);
+                    if (q.length > 0) paper.push(q[0]);
+                    if (paper.length >= 60) break; // Don't exceed JAMB total
                 }
-                paper.push(...gathered.slice(0, sec.count));
             } else {
+                // General Lexis Structure
                 const qs = await Question.aggregate([
                     { $match: { topic: sec.topic, subtopic: sec.subtopic } },
                     { $sample: { size: sec.count } }
                 ]);
-                paper.push(...qs);
+                if (qs.length > 0) paper.push(...qs);
             }
         } catch (e) {
-            console.error(`Error in English Section ${sec.subtopic}:`, e.message);
+            // Log the error but DON'T stop the loop
+            console.error(`Skipping section ${sec.subtopic}: Not enough questions in DB.`);
         }
     }
     return paper;
@@ -420,8 +425,15 @@ async function getEnglishPaper(batchId) {
 
 app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
     try {
-        const exam = await Exam.findById(req.params.examId);
-        if (!exam) return res.status(404).json({ error: "Exam session not found" });
+        const { examId } = req.params;
+        
+        // Safety: If examId is a string "null" or missing
+        if (!examId || examId === "null") {
+            return res.status(400).json({ error: "Invalid Exam ID" });
+        }
+
+        const exam = await Exam.findById(examId);
+        if (!exam) return res.status(404).json({ error: "Session not found" });
 
         const results = [];
         for (const sub of exam.subjectCombination) {
@@ -429,9 +441,11 @@ app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
             if (sub === "Use of English") {
                 questions = await getEnglishPaper(exam.batchId);
             } else {
-                // Pull from batch pool
-                const pool = await Question.aggregate([{ $match: { subject: sub } }, { $sample: { size: 60 } }]);
-                questions = pool.sort(() => 0.5 - Math.random()).slice(0, 40);
+                // Normal subjects
+                questions = await Question.aggregate([
+                    { $match: { subject: sub } },
+                    { $sample: { size: 40 } }
+                ]);
             }
 
             results.push({
@@ -444,7 +458,7 @@ app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
         }
         res.json(results);
     } catch (err) {
-        console.error("CRITICAL SERVER ERROR:", err);
+        console.error("Fetch Questions Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
