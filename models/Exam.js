@@ -23,7 +23,6 @@ const ExamSchema = new mongoose.Schema({
   totalSecondsRemaining: { type: Number },
     startTime: { type: Date, default: Date.now },
     endTime: { type: Date }
-  lastActive: { type: Date, default: Date.now }
 });
 
 module.exports = mongoose.model('Exam', ExamSchema);
