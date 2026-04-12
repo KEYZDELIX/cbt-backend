@@ -524,91 +524,57 @@ app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
   }
 });
 
-// 5. Save Answer (Live Persistence)
 
-app.post('/save-answer', async (req, res) => {
+// POST /api/exams/submit-exam
+app.post('/api/exams/submit-exam', async (req, res) => {
     try {
-        const { examId, questionId, selectedOptionKey, subject, timeSpentOnSubject } = req.body;
+        const { 
+            userId, 
+            examId, 
+            responses, 
+            subjectAnalysis, 
+            totalSecondsRemaining, 
+            status 
+        } = req.body;
 
-        // Use atomic operators ($set and $inc) to reduce server load
-        await Exam.updateOne(
-            { _id: examId, "responses.questionId": questionId },
+        // 1. Validation
+        if (!userId || !examId) {
+            return res.status(400).json({ error: "Missing User ID or Exam ID" });
+        }
+
+        // 2. Update the Exam Record
+        const updatedExam = await Exam.findOneAndUpdate(
+            { _id: examId, userId: userId },
             { 
-                $set: { "responses.$.selectedOptionKey": selectedOptionKey },
-                $set: { lastActive: new Date() }
-            }
-        ).then(async (result) => {
-            if (result.matchedCount === 0) {
-                // If answer doesn't exist, push new one
-                await Exam.updateOne(
-                    { _id: examId },
-                    { $push: { responses: { questionId, selectedOptionKey, subject } } }
-                );
-            }
-        });
-
-        // Update Subject Time Tracking
-        await Exam.updateOne(
-            { _id: examId, "subjectAnalysis.subjectName": subject },
-            { $inc: { "subjectAnalysis.$.secondsSpent": timeSpentOnSubject } }
+                $set: { 
+                    responses: responses,            // Array of {questionId, selectedOptionKey, subject}
+                    subjectAnalysis: subjectAnalysis, // Array of {subjectName, secondsSpent}
+                    totalSecondsRemaining: totalSecondsRemaining,
+                    status: status,                  // 'active', 'submitted', or 'timed-out'
+                    // Mark endTime only if the exam is actually finished
+                    endTime: (status === 'submitted' || status === 'timed-out') ? new Date() : null
+                } 
+            },
+            { new: true, runValidators: true } // Return the updated doc
         );
 
-        res.json({ success: true });
+        if (!updatedExam) {
+            return res.status(404).json({ error: "Exam session not found." });
+        }
+
+        // 3. Response
+        res.json({ 
+            success: true, 
+            message: status === 'active' ? "Progress auto-saved" : "Exam finalized",
+            status: updatedExam.status 
+        });
+
     } catch (err) {
-        res.status(500).json({ error: "Silent Save Error" });
+        console.error("Backend Error:", err);
+        res.status(500).json({ error: "Internal Server Error: " + err.message });
     }
 });
 
-
-// 6. Submit Exam & Generate Final Result
-app.post('/submit-exam', async (req, res) => {
-  try {
-    const { examId } = req.body;
-    const exam = await Exam.findById(examId).populate('userId');
-    
-    if (exam.status === 'submitted') return res.status(400).json({ message: "Exam already submitted" });
-
-    let subjectBreakdown = [];
-    let grandTotal = 0;
-
-    for (let subjectName of exam.subjectCombination) {
-      const responses = exam.responses.filter(r => r.subject === subjectName);
-      const correctCount = responses.filter(r => r.isCorrect).length;
-      
-      const rawScore = responses.reduce((acc, curr) => acc + curr.pointsEarned, 0);
-      const totalPossibleWeight = (subjectName === "Use of English") ? 60 : 40; 
-      
-      // Scaling to 100
-      const weightedScore = Math.min(100, (rawScore / totalPossibleWeight) * 100);
-      
-      subjectBreakdown.push({
-        subjectName,
-        correctCount,
-        totalQuestions: totalPossibleWeight,
-        weightedScore: Math.round(weightedScore)
-      });
-
-      grandTotal += weightedScore;
-    }
-
-    const finalResult = new Result({
-      userId: exam.userId._id,
-      examId: exam._id,
-      subjectResults: subjectBreakdown,
-      aggregateScore: Math.round(grandTotal)
-    });
-
-    await finalResult.save();
-    
-    exam.status = 'submitted';
-    exam.endTime = new Date();
-    await exam.save();
-
-    res.json(finalResult);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // 7. Admin: View All Results
 app.get('/all-results', async (req, res) => {
