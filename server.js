@@ -559,51 +559,54 @@ app.post('/api/exams/submit-exam', async (req, res) => {
             { new: true }
         );
 
-        if (status === 'submitted' || status === 'timed-out') {
-            const subjectResults = [];
-            const userSubjects = updatedExam.subjectCombination || [];
+        for (const subName of userSubjects) {
+    // 1. Determine expected total count
+    const isEnglish = subName.toLowerCase().includes('english');
+    const expectedTotal = isEnglish ? 60 : 40;
 
-                for (const subName of userSubjects) {
-    // 1. Calculate the 'Perfect Score' denominator for THIS subject
-    // We sum the weights of ALL questions belonging to this subject in the database
-    const allSubjectQuestions = await Question.find({ subject: subName });
-    const totalPossibleWeight = allSubjectQuestions.reduce((acc, q) => acc + (q.weight || 1), 0);
-    
-    // Set standard JAMB question counts for raw scaling
-    const totalQsCount = subName.toLowerCase().includes('english') ? 60 : 40;
+    // 2. Calculate the 'Perfect Score' denominator
+    // Get weights of questions actually in the DB
+    const dbQuestions = await Question.find({ subject: subName });
+    const countInDb = dbQuestions.length;
+    const weightInDb = dbQuestions.reduce((acc, q) => acc + (q.weight || 1), 0);
 
-    // 2. Filter user's specific answers for this subject
+    // If we have fewer questions than expected, assume the rest have a weight of 1.0
+    let totalPossibleWeight;
+    if (countInDb < expectedTotal) {
+        const missingCount = expectedTotal - countInDb;
+        totalPossibleWeight = weightInDb + (missingCount * 1.0);
+    } else {
+        // If you accidentally uploaded more than 40, we just use the sum of all of them
+        totalPossibleWeight = weightInDb;
+    }
+
+    // 3. Mark User Responses
     const subResponses = responses.filter(r => r.subject === subName);
     let correctCount = 0;
     let earnedWeight = 0;
 
-    // 3. Mark the answers
     for (const resp of subResponses) {
         const q = await Question.findById(resp.questionId);
-        
         if (q && q.correctOptionKey) {
             const dbAns = q.correctOptionKey.trim().toUpperCase();
             const userAns = resp.selectedOptionKey.trim().toUpperCase();
 
             if (dbAns === userAns) {
                 correctCount++;
-                // Add the specific weight of THIS question (default to 1 if missing)
                 earnedWeight += (q.weight || 1);
             }
         }
     }
 
     // 4. Calculate final percentages
-    // weightedScore1 = (Sum of Earned Weights / Sum of All Available Weights) * 100
+    // Now, 1 correct question (Weight 1.0) out of a "Gap-Filled" 40 will correctly give 2.5%
     const wScore1 = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
-    
-    // rawScore1 = (Number of Correct Answers / Total Questions Expected) * 100
-    const rScore1 = (correctCount / totalQsCount) * 100;
+    const rScore1 = (correctCount / expectedTotal) * 100;
 
     subjectResults.push({
         subjectName: subName,
         correctCount,
-        totalQuestions: totalQsCount,
+        totalQuestions: expectedTotal,
         rawScore1: rScore1,
         rawScore2: Math.round(rScore1),
         weightedScore1: wScore1, 
