@@ -853,22 +853,72 @@ app.get('/api/students/by-group', async (req, res) => {
 
 
 
-//Reset UserExamSession
-app.post('/api/exams/reset/:id', async (req, res) => {
-    const { type, regNumbers } = req.body;
-    const examId = req.params.id;
-
+//Reset UserExamSession// GET: Fetch all students who have attempted a specific exam
+app.get('/api/exams/attempts/:examId', async (req, res) => {
     try {
-        if (type === 'all') {
-            // Delete all result records matching this exam ID
-            await Result.deleteMany({ examId: examId });
-        } else {
-            // Delete only records for specific registration numbers
-            await Result.deleteMany({ examId: examId, regNo: { $in: regNumbers } });
-        }
-        res.json({ message: "Reset complete" });
+        const { examId } = req.params;
+        
+        // Find all results for this exam config
+        const results = await Result.find({ examId });
+        
+        // We need to get student names from the User model based on the results
+        const studentData = await Promise.all(results.map(async (r) => {
+            const user = await User.findById(r.userId);
+            return {
+                regNo: user ? user.regNo : "Unknown",
+                name: user ? `${user.firstName} ${user.lastName}` : "Deleted User",
+                status: "Submitted", // If it's in Results, it's finished
+                score: r.totalWeightedScore,
+                userId: r.userId
+            };
+        }));
+
+        res.json(studentData);
     } catch (err) {
-        res.status(500).json({ error: "Reset failed" });
+        res.status(500).json({ error: err.message });
+    }
+});
+// POST: Reset exam progress
+app.post('/api/exams/reset/:examId', async (req, res) => {
+    try {
+        const { examId } = req.params;
+        const { type, regNumbers } = req.body;
+
+        let query = { "examAllocations.examId": examId };
+        
+        // If 'selected', we filter by the specific regNumbers provided
+        if (type === 'selected') {
+            query.regNo = { $in: regNumbers };
+        }
+
+        // 1. Find the target users
+        const targetUsers = await User.find(query);
+        const userIds = targetUsers.map(u => u._id);
+
+        // 2. Wipe Result records
+        await Result.deleteMany({ 
+            examId: examId, 
+            userId: { $in: userIds } 
+        });
+
+        // 3. Wipe Active/Past Exam Sessions
+        await Exam.deleteMany({ 
+            examId: examId, 
+            userId: { $in: userIds } 
+        });
+
+        // 4. Reset the 'hasTaken' flag in User Allocations
+        // We use positional filtered positional operator $[elem] to update the specific allocation
+        await User.updateMany(
+            { _id: { $in: userIds } },
+            { $set: { "examAllocations.$[elem].hasTaken": false } },
+            { arrayFilters: [{ "elem.examId": examId }] }
+        );
+
+        res.json({ success: true, message: `Reset completed for ${userIds.length} students.` });
+    } catch (err) {
+        console.error("Reset Error:", err);
+        res.status(500).json({ error: err.message });
     }
 });
 
