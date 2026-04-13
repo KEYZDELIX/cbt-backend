@@ -63,7 +63,7 @@ const User = require('./models/User');
 const Exam = require('./models/Exam');
 const ExamConfig = require('./models/ExamConfig');
 const bcrypt = require('bcryptjs'); // Highly recommended for password security
-const { runNormalization } = require('../utils/scoring');
+const { runNormalization } = require('./utils/scoring');
 
 const app = express();
 app.use(cors());
