@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const ExamSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  examId: { type: mongoose.Schema.Types.ObjectId, ref: 'ExamConfig' },
   status: { 
         type: String, 
         enum: ['active', 'submitted', 'timed-out'], 
