@@ -558,74 +558,74 @@ app.post('/api/exams/submit-exam', async (req, res) => {
               endTime: (status === 'submitted' || status === 'timed-out') ? new Date() : null } },
             { new: true }
         );
-for (const subName of userSubjects) {
-    // 1. Determine expected total count
-    const isEnglish = subName.toLowerCase().includes('english');
-    const expectedTotal = isEnglish ? 60 : 40;
 
-    // 2. Calculate the 'Perfect Score' denominator
-    // Get weights of questions actually in the DB
-    const dbQuestions = await Question.find({ subject: subName });
-    const countInDb = dbQuestions.length;
-    const weightInDb = dbQuestions.reduce((acc, q) => acc + (q.weight || 1), 0);
+        // --- ERROR FIX: Added the missing IF block and defined userSubjects ---
+        if (status === 'submitted' || status === 'timed-out') {
+            const subjectResults = [];
+            const userSubjects = updatedExam.subjectCombination || []; // Pull from DB
 
-    // If we have fewer questions than expected, assume the rest have a weight of 1.0
-    let totalPossibleWeight;
-    if (countInDb < expectedTotal) {
-        const missingCount = expectedTotal - countInDb;
-        totalPossibleWeight = weightInDb + (missingCount * 1.0);
-    } else {
-        // If you accidentally uploaded more than 40, we just use the sum of all of them
-        totalPossibleWeight = weightInDb;
-    }
+            for (const subName of userSubjects) {
+                // 1. Determine expected total count
+                const isEnglish = subName.toLowerCase().includes('english');
+                const expectedTotal = isEnglish ? 60 : 40;
 
-    // 3. Mark User Responses
-    const subResponses = responses.filter(r => r.subject === subName);
-    let correctCount = 0;
-    let earnedWeight = 0;
+                // 2. Calculate the 'Perfect Score' denominator
+                const dbQuestions = await Question.find({ subject: subName });
+                const countInDb = dbQuestions.length;
+                const weightInDb = dbQuestions.reduce((acc, q) => acc + (q.weight || 1), 0);
 
-    for (const resp of subResponses) {
-        const q = await Question.findById(resp.questionId);
-        if (q && q.correctOptionKey) {
-            const dbAns = q.correctOptionKey.trim().toUpperCase();
-            const userAns = resp.selectedOptionKey.trim().toUpperCase();
+                let totalPossibleWeight;
+                if (countInDb < expectedTotal) {
+                    const missingCount = expectedTotal - countInDb;
+                    totalPossibleWeight = weightInDb + (missingCount * 1.0);
+                } else {
+                    totalPossibleWeight = weightInDb;
+                }
 
-            if (dbAns === userAns) {
-                correctCount++;
-                earnedWeight += (q.weight || 1);
-            }
-        }
-    }
+                // 3. Mark User Responses
+                const subResponses = responses.filter(r => r.subject === subName);
+                let correctCount = 0;
+                let earnedWeight = 0;
 
-    // 4. Calculate final percentages
-    // Now, 1 correct question (Weight 1.0) out of a "Gap-Filled" 40 will correctly give 2.5%
-    const wScore1 = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
-    const rScore1 = (correctCount / expectedTotal) * 100;
+                for (const resp of subResponses) {
+                    const q = await Question.findById(resp.questionId);
+                    if (q && q.correctOptionKey) {
+                        const dbAns = q.correctOptionKey.trim().toUpperCase();
+                        const userAns = resp.selectedOptionKey.trim().toUpperCase();
 
-    subjectResults.push({
-        subjectName: subName,
-        correctCount,
-        totalQuestions: expectedTotal,
-        rawScore1: rScore1,
-        rawScore2: Math.round(rScore1),
-        weightedScore1: wScore1, 
-        weightedScore2: Math.round(wScore1),
-        normalizedScore1: 0, 
-        normalizedScore2: 0
-    });
-}
-        
+                        if (dbAns === userAns) {
+                            correctCount++;
+                            earnedWeight += (q.weight || 1);
+                        }
+                    }
+                }
+
+                // 4. Calculate final percentages
+                const wScore1 = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
+                const rScore1 = (correctCount / expectedTotal) * 100;
+
+                subjectResults.push({
+                    subjectName: subName,
+                    correctCount,
+                    totalQuestions: expectedTotal,
+                    rawScore1: rScore1,
+                    rawScore2: Math.round(rScore1),
+                    weightedScore1: wScore1, 
+                    weightedScore2: Math.round(wScore1),
+                    normalizedScore1: 0, 
+                    normalizedScore2: 0
+                });
+            } // End of for loop
 
             const totalRaw = subjectResults.reduce((acc, s) => acc + s.rawScore2, 0);
             const totalWeighted = subjectResults.reduce((acc, s) => acc + s.weightedScore2, 0);
 
             const finalResult = await Result.findOneAndUpdate(
-                { userId, examId: updatedExam.examId }, // Use config ID
+                { userId, examId: updatedExam.examId }, 
                 { userId, examId: updatedExam.examId, subjectResults, totalRawScore: totalRaw, totalWeightedScore: totalWeighted, timeTaken: 7200 - totalSecondsRemaining },
                 { upsert: true, new: true }
             );
 
-            // Update User hasTaken flag
             await User.updateOne(
                 { _id: userId, "examAllocations.examId": updatedExam.examId },
                 { $set: { "examAllocations.$.hasTaken": true } }
@@ -635,9 +635,11 @@ for (const subName of userSubjects) {
             const refreshed = await Result.findById(finalResult._id);
 
             return res.json({ success: true, status: "finished", data: refreshed });
-        }
+        } // End of status check block
+
         res.json({ success: true, status: "active" });
     } catch (err) {
+        console.error("Submit Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
