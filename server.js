@@ -470,16 +470,31 @@ app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
 
 app.post('/api/exams/start-exam', async (req, res) => {
     try {
-        const { userId } = req.body;
-        let exam = await Exam.findOne({ userId, status: 'active' });
+        const { userId, examId } = req.body; // Pass the specific Exam ID from the dashboard
+        
+        // 1. Check if an active session already exists for this specific exam
+        let exam = await Exam.findOne({ userId, examId, status: 'active' });
 
         if (!exam) {
             const user = await User.findById(userId);
             if (!user) return res.status(404).json({ error: "User not found" });
 
+            // 2. Check the Allocation list to see if they've already taken this specific exam
+            const allocation = user.examAllocations.find(a => 
+                a.examId.toString() === examId.toString()
+            );
+
+            if (allocation && allocation.hasTaken) {
+                return res.status(403).json({ 
+                    error: "EXAM_ALREADY_TAKEN", 
+                    message: "You have already submitted this exam attempt." 
+                });
+            }
+
+            // 3. If not taken, create the new session
             exam = new Exam({
                 userId: user._id,
-                // SAVE THE SUBJECTS HERE
+                examId: examId, // Link this session to the specific Mock Exam ID
                 subjectCombination: user.subjectCombination, 
                 status: 'active',
                 startTime: new Date()
@@ -539,71 +554,68 @@ app.post('/api/exams/submit-exam', async (req, res) => {
             { new: true }
         );
 
-        if (status === 'submitted' || status === 'timed-out') {
-            const subjectResults = [];
-            const userSubjects = updatedExam.subjectCombination || ["Use of English", "Mathematics", "Physics", "Chemistry"];
+        // Inside your submit route...
+if (status === 'submitted' || status === 'timed-out') {
+    const subjectResults = [];
+    const userSubjects = updatedExam.subjectCombination || [];
 
-            for (const subName of userSubjects) {
-                const subResponses = responses.filter(r => r.subject === subName);
-                let correctCount = 0;
-                let totalPossibleWeight = 0; // To calculate the denominator
-                let earnedWeight = 0;        // To calculate the numerator
+    for (const subName of userSubjects) {
+        // Find all questions in DB for this subject to get "Total Possible Weight"
+        const questionsInDb = await Question.find({ subject: subName });
+        const totalPossibleWeight = questionsInDb.reduce((acc, q) => acc + (q.weight || 1), 0);
+        
+        const subResponses = responses.filter(r => r.subject === subName);
+        let correctCount = 0;
+        let earnedWeight = 0;
 
-                // 1. Get all questions for this subject to know the total weight
-                const questionsInSub = await Question.find({ subject: subName });
-                totalPossibleWeight = questionsInSub.reduce((acc, q) => acc + (q.weight || 1), 0);
-                const totalQuestions = subName.toLowerCase().includes('english') ? 60 : 40;
-
-                // 2. Marking Loop
-                for (const resp of subResponses) {
-                    const q = await Question.findById(resp.questionId);
-                    
-                    if (q && q.correctOptionKey) {
-                        const dbAns = q.correctOptionKey.toString().trim().toUpperCase();
-                        const userAns = resp.selectedOptionKey.toString().trim().toUpperCase();
-
-                        if (dbAns === userAns) {
-                            correctCount++;
-                            earnedWeight += (q.weight || 1);
-                        }
-                    }
+        for (const resp of subResponses) {
+            const q = await Question.findById(resp.questionId);
+            if (q && q.correctOptionKey && resp.selectedOptionKey) {
+                if (q.correctOptionKey.trim().toUpperCase() === resp.selectedOptionKey.trim().toUpperCase()) {
+                    correctCount++;
+                    earnedWeight += (q.weight || 1);
                 }
-
-                // Calculation: (Earned Weight / Total Possible Weight) * 100
-                // This ensures that even if questions have different weights (e.g., 1.5 vs 1.0), it scales to 100
-                const wScore1 = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
-                const rScore1 = (correctCount / totalQuestions) * 100;
-                
-                subjectResults.push({
-                    subjectName: subName,
-                    correctCount: correctCount,
-                    totalQuestions: totalQuestions,
-                    rawScore1: rScore1,
-                    rawScore2: Math.round(rScore1),
-                    weightedScore1: wScore1, 
-                    weightedScore2: Math.round(wScore1),
-                    normalizedScore1: 0, 
-                    normalizedScore2: 0
-                });
             }
-
-            const finalResult = await Result.findOneAndUpdate(
-                { userId, examId },
-                { userId, examId, subjectResults, timeTaken: 7200 - totalSecondsRemaining },
-                { upsert: true, new: true }
-            );
-
-            // Run Normalization using weightedScore1 (x)
-            await runNormalization(Result);
-
-            const refreshedResult = await Result.findById(finalResult._id);
-
-            return res.json({ 
-                success: true, 
-                status: "finished", 
-                data: refreshedResult 
-            });
         }
+
+        const totalQs = subName.toLowerCase().includes('english') ? 60 : 40;
+        
+        // Logic: (Earned Weight / Total Weight) * 100
+        const wScore1 = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
+        const rScore1 = (correctCount / totalQs) * 100;
+
+        subjectResults.push({
+            subjectName: subName,
+            correctCount,
+            totalQuestions: totalQs,
+            rawScore1: rScore1,
+            rawScore2: Math.round(rScore1),
+            weightedScore1: wScore1,
+            weightedScore2: Math.round(wScore1),
+            normalizedScore1: 0,
+            normalizedScore2: 0
+        });
+    }
+
+    // Save Result
+    const finalResult = await Result.findOneAndUpdate(
+        { userId, examId },
+        { userId, examId, subjectResults, timeTaken: 7200 - totalSecondsRemaining },
+        { upsert: true, new: true }
+    );
+
+    // 3. Update User "hasTaken" status for this allocation
+    await User.updateOne(
+        { _id: userId, "examAllocations.examId": examId },
+        { $set: { "examAllocations.$.hasTaken": true } }
+    );
+
+    // 4. Run Normalization (Scoped to this exam)
+    await runNormalization(Result, examId);
+
+    const refreshed = await Result.findById(finalResult._id);
+    return res.json({ success: true, status: "finished", data: refreshed });
+}
 
         res.json({ success: true, status: "active" });
     } catch (err) {

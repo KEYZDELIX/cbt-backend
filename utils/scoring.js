@@ -1,75 +1,58 @@
 const getMean = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-
 const getSD = (arr, mean) => {
-    if (arr.length <= 1) return 0; // SD is 0 if only one student exists
+    if (arr.length <= 1) return 0;
     const variance = arr.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / arr.length;
     return Math.sqrt(variance);
 };
 
-exports.runNormalization = async (ResultModel) => {
-    // 1. Fetch all results to get a global context
-    const allResults = await ResultModel.find();
+exports.runNormalization = async (ResultModel, targetExamId) => {
+    // CRITICAL: Only fetch results for this specific Exam ID
+    const allResults = await ResultModel.find({ examId: targetExamId });
     if (allResults.length === 0) return;
 
-    // Constants for JAMB Curve
-    const S1 = 15; // Target Standard Deviation (Chosen to simulate JAMB's spread)
+    const S1 = 15; // JAMB standard deviation constant
 
-    // 2. Calculate Global Mean (x'1)
-    // This is the average of all weighted scores across all students and subjects
-    let totalOfAllWeights = 0;
-    let totalSubjectEntries = 0;
-    
-    allResults.forEach(r => {
-        r.subjectResults.forEach(s => {
-            totalOfAllWeights += s.weightedScore1;
-            totalSubjectEntries++;
-        });
-    });
-    
-    const globalMean = totalSubjectEntries > 0 ? totalOfAllWeights / totalSubjectEntries : 0;
+    // 1. Global Mean across this specific exam
+    let totalWeights = 0;
+    let count = 0;
+    allResults.forEach(r => r.subjectResults.forEach(s => {
+        totalWeights += (s.weightedScore1 || 0);
+        count++;
+    }));
+    const globalMean = count > 0 ? totalWeights / count : 0;
 
-    // 3. Normalize each result document
     for (let res of allResults) {
-        let currentAggregate = 0;
-        let currentPrecise = 0;
+        let normSum = 0;
+        let weightedSum = 0;
+        let rawSum = 0;
 
         res.subjectResults.forEach(sub => {
-            const x = sub.weightedScore1;
-
-            // Gather all scores for THIS specific subject across ALL students
-            const allScoresForThisSubject = allResults.map(r => {
+            const x = sub.weightedScore1 || 0;
+            const batchWeights = allResults.map(r => {
                 const match = r.subjectResults.find(s => s.subjectName === sub.subjectName);
                 return match ? match.weightedScore1 : null;
-            }).filter(val => val !== null);
+            }).filter(v => v !== null);
 
-            const x_prime = getMean(allScoresForThisSubject);
-            const S2 = getSD(allScoresForThisSubject, x_prime);
+            const x_prime = getMean(batchWeights);
+            const S2 = getSD(batchWeights, x_prime);
 
-            // JAMB Normalization Formula: [S1(x - x') / S2] + x'1
-            let norm1;
-            if (S2 < 0.001) { 
-                // Fallback: If no variance (one student or all same scores), 
-                // normalization is impossible, so we keep the weighted score.
-                norm1 = x; 
-            } else {
-                norm1 = ((S1 * (x - x_prime)) / S2) + globalMean;
-            }
+            // The Normalization Formula with NaN protection
+            let norm1 = (S2 < 0.01) ? x : ((S1 * (x - x_prime)) / S2) + globalMean;
             
-            // Apply caps (Optional: Ensures scores don't exceed 100 or drop below 0)
-            norm1 = Math.max(0, Math.min(100, norm1));
+            sub.normalizedScore1 = isNaN(norm1) ? x : norm1;
+            sub.normalizedScore2 = Math.round(sub.normalizedScore1);
 
-            sub.normalizedScore1 = norm1;
-            sub.normalizedScore2 = Math.round(norm1);
-
-            currentAggregate += sub.normalizedScore2;
-            currentPrecise += norm1;
+            normSum += sub.normalizedScore1;
+            weightedSum += (sub.weightedScore2 || 0);
+            rawSum += (sub.rawScore2 || 0);
         });
 
-        // 4. Update the document totals
-        res.aggregateScore = currentAggregate;
-        res.preciseRankingScore = parseFloat(currentPrecise.toFixed(3));
+        // 2. Multi-Aggregate Comparison
+        res.aggregateScore = Math.round(normSum); // Default display
+        res.totalRawScore = rawSum;               // Raw sum (e.g. 240/400)
+        res.totalWeightedScore = weightedSum;     // Weighted sum
+        res.preciseRankingScore = parseFloat(normSum.toFixed(3));
         
-        // Save the updated calculation back to MongoDB
         await res.save();
     }
 };
