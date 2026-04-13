@@ -470,18 +470,22 @@ app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
 
 app.post('/api/exams/start-exam', async (req, res) => {
     try {
-        const { userId, examId } = req.body; // Pass the specific Exam ID from the dashboard
-        
-        // 1. Check if an active session already exists for this specific exam
+        const { userId, examId } = req.body;
+
+        // 1. Check if examId was actually sent
+        if (!examId) {
+            return res.status(400).json({ error: "No Exam ID provided" });
+        }
+
         let exam = await Exam.findOne({ userId, examId, status: 'active' });
 
         if (!exam) {
             const user = await User.findById(userId);
             if (!user) return res.status(404).json({ error: "User not found" });
 
-            // 2. Check the Allocation list to see if they've already taken this specific exam
-            const allocation = user.examAllocations.find(a => 
-                a.examId.toString() === examId.toString()
+            // 2. Check allocations with "Optional Chaining" (?.) to prevent crashes
+            const allocation = user.examAllocations?.find(a => 
+                a.examId?.toString() === examId.toString()
             );
 
             if (allocation && allocation.hasTaken) {
@@ -491,10 +495,9 @@ app.post('/api/exams/start-exam', async (req, res) => {
                 });
             }
 
-            // 3. If not taken, create the new session
             exam = new Exam({
                 userId: user._id,
-                examId: examId, // Link this session to the specific Mock Exam ID
+                examId: examId, 
                 subjectCombination: user.subjectCombination, 
                 status: 'active',
                 startTime: new Date()
@@ -504,6 +507,7 @@ app.post('/api/exams/start-exam', async (req, res) => {
 
         res.json({ examId: exam._id });
     } catch (err) {
+        console.error("Start Exam Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
