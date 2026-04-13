@@ -1,34 +1,30 @@
 const mongoose = require('mongoose');
 
 const ResultSchema = new mongoose.Schema({
-  // Link to the User and the specific Exam session
-  userId: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User', 
-    required: true 
-  },
-  examId: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'Exam' 
-  },
-
-  // Breakdown per Subject
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  examId: { type: mongoose.Schema.Types.ObjectId, ref: 'Exam', required: true },
+  
   subjectResults: [{
-    subjectName: String, // e.g., "Use of English"
-    correctCount: { type: Number, default: 0 }, // e.g., 45
-    totalQuestions: { type: Number, default: 40 }, // 60 for English, 40 others
-    weightedScore: { type: Number, default: 0 }  // Scaled to 100
+    subjectName: String,
+    correctCount: { type: Number, default: 0 },
+    totalQuestions: { type: Number, default: 40 },
+    
+    // Raw Scoring
+    rawScore1: Number,      // (correct/total) * 100
+    rawScore2: Number,      // round(rawScore1)
+    
+    // Weighted Scoring (Used for Normalization)
+    weightedScore1: Number, // The x in your formula
+    weightedScore2: Number, // round(weightedScore1)
+    
+    // JAMB Normalization
+    normalizedScore1: Number, // [S1(x - x')/ S2] + x'1
+    normalizedScore2: Number  // round(normalizedScore1)
   }],
 
-  // Grand Totals
-  aggregateScore: { 
-    type: Number, 
-    default: 0, 
-    max: 400 
-  },
-  
-  // Performance Metadata
-  timeTaken: { type: Number }, // In seconds, for analytics
+  aggregateScore: { type: Number, default: 0 }, // Sum of normalizedScore2
+  preciseRankingScore: { type: Number },        // Sum of normalizedScore1 (to 3 decimals)
+  timeTaken: { type: Number }, 
   examDate: { type: Date, default: Date.now }
 });
 

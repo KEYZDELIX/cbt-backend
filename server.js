@@ -63,6 +63,7 @@ const User = require('./models/User');
 const Exam = require('./models/Exam');
 const ExamConfig = require('./models/ExamConfig');
 const bcrypt = require('bcryptjs'); // Highly recommended for password security
+const { runNormalization } = require('../utils/scoring');
 
 const app = express();
 app.use(cors());
@@ -526,52 +527,77 @@ app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
 
 
 // POST /api/exams/submit-exam
+
 app.post('/api/exams/submit-exam', async (req, res) => {
     try {
-        const { 
-            userId, 
-            examId, 
-            responses, 
-            subjectAnalysis, 
-            totalSecondsRemaining, 
-            status 
-        } = req.body;
+        const { userId, examId, responses, subjectAnalysis, totalSecondsRemaining, status } = req.body;
 
-        // 1. Validation
-        if (!userId || !examId) {
-            return res.status(400).json({ error: "Missing User ID or Exam ID" });
-        }
+        if (!userId || !examId) return res.status(400).json({ error: "Missing IDs" });
 
-        // 2. Update the Exam Record
+        // 1. Update Exam Record
         const updatedExam = await Exam.findOneAndUpdate(
-            { _id: examId, userId: userId },
-            { 
-                $set: { 
-                    responses: responses,            // Array of {questionId, selectedOptionKey, subject}
-                    subjectAnalysis: subjectAnalysis, // Array of {subjectName, secondsSpent}
-                    totalSecondsRemaining: totalSecondsRemaining,
-                    status: status,                  // 'active', 'submitted', or 'timed-out'
-                    // Mark endTime only if the exam is actually finished
-                    endTime: (status === 'submitted' || status === 'timed-out') ? new Date() : null
-                } 
-            },
-            { new: true, runValidators: true } // Return the updated doc
+            { _id: examId, userId },
+            { $set: { responses, subjectAnalysis, totalSecondsRemaining, status, 
+              endTime: (status === 'submitted' || status === 'timed-out') ? new Date() : null } },
+            { new: true }
         );
+// 2. If finished, calculate the "Raw" counts
+        if (status === 'submitted' || status === 'timed-out') {
+            const subjectResults = [];
+            
+            // Get all unique subject names from the responses
+            const subjects = [...new Set(responses.map(r => r.subject))];
 
-        if (!updatedExam) {
-            return res.status(404).json({ error: "Exam session not found." });
+            for (const subName of subjects) {
+                const subResponses = responses.filter(r => r.subject === subName);
+                let correctCount = 0;
+
+                // Compare each response to the database answer
+                for (const resp of subResponses) {
+                    const q = await Question.findById(resp.questionId);
+                    if (q && q.correctOption === resp.selectedOptionKey) {
+                        correctCount++;
+                    }
+                }
+             const totalQuestions = subName.toLowerCase() === 'english' ? 60 : 40;
+                const raw1 = (correctCount / totalQuestions) * 100;
+                
+                subjectResults.push({
+                    subjectName: subName,
+                    correctCount: correctCount,
+                    totalQuestions: totalQuestions,
+                    rawScore1: raw1,
+                    rawScore2: Math.round(raw1),
+                    weightedScore1: raw1, // Your 'x' for later normalization
+                    weightedScore2: Math.round(raw1)
+                });
+            }
+
+            // Create/Update the Result document
+            const finalResult = await Result.findOneAndUpdate(
+                { userId, examId },
+                { 
+                    userId, examId, 
+                    subjectResults, 
+                    timeTaken: 7200 - totalSecondsRemaining 
+                },
+                { upsert: true, new: true }
+            );
+          // Run normalization silently in background (updates the DB)
+            runNormalization(Result).catch(e => console.error("Normalization Error:", e));
+
+            // Return the correctCount data for the frontend to show immediately
+            return res.json({ 
+                success: true, 
+                status: "finished", 
+                data: finalResult 
+            });
         }
 
-        // 3. Response
-        res.json({ 
-            success: true, 
-            message: status === 'active' ? "Progress auto-saved" : "Exam finalized",
-            status: updatedExam.status 
-        });
+        res.json({ success: true, status: "active" });
 
     } catch (err) {
-        console.error("Backend Error:", err);
-        res.status(500).json({ error: "Internal Server Error: " + err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
