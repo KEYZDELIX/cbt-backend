@@ -288,35 +288,7 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
 });
 
 
-// --- EXAM & USER ROUTES ---
 
-// 3. Login Route (Fixed "Undefined" Error)
-/** app.post('/login', async (req, res) => {
-  try {
-    const { regNumber, password } = req.body;
-    const user = await User.findOne({ regNumber: regNumber.toUpperCase(), password });
-    if (!user) return res.status(401).json({ message: "Invalid Credentials" });
-
-    // Find active config or most recent config
-    const config = await ExamConfig.findOne({ isActive: true }); 
-    
-    // Check attempts
-    const attemptCount = await Exam.countDocuments({ userId: user._id, status: 'submitted' });
-    const canTakeExam = config ? (attemptCount < config.maxAttempts) : true;
-
-    res.json({
-      success: true,
-      user,
-      config: config || { name: "General Mock", durationMinutes: 120 },
-      attemptCount,
-      canTakeExam
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-**/
 
 
 app.post('/api/auth/login', async (req, res) => {
@@ -374,51 +346,57 @@ const currentAllocation = user.examAllocations.find(alloc => {
 
 // 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
 
-async function getEnglishPaper(batchId) {
+async function getEnglishPaper(examConfigId) {
     const paper = [];
-    const sections = [
-        { topic: "Section A: Comprehension and Summary", subtopic: "Comprehension Passage", count: 5, isPassage: true },
-        { topic: "Section A: Comprehension and Summary", subtopic: "Cloze Passage", count: 10, isPassage: true },
-        { topic: "Section A: Comprehension and Summary", subtopic: "Reading Text", count: 10 },
-        { topic: "Section B: Lexis and Structure", subtopic: "Sentence Interpretation", count: 5 },
-        { topic: "Section B: Lexis and Structure", subtopic: "Antonyms", count: 5 },
-        { topic: "Section B: Lexis and Structure", subtopic: "Synonyms", count: 5 },
-        { topic: "Section B: Lexis and Structure", subtopic: "Sentence Completion", count: 10 },
-        { topic: "Section C: Oral Forms", subtopic: "Oral Forms", count: 10, isOral: true }
-    ];
+    const ExamConfig = require('./models/ExamConfig'); // Adjust path as needed
+    const config = await ExamConfig.findById(examConfigId);
 
-    for (const sec of sections) {
+    if (!config || !config.englishDist || config.englishDist.length === 0) {
+        console.error("No English distribution found in config!");
+        return [];
+    }
+
+    // Loop through each rule set in the config (e.g., Section A -> Cloze -> 10 questions)
+    for (const dist of config.englishDist) {
         try {
-            if (sec.isPassage) {
-                // Try to find a passage group
-                const passage = await Question.aggregate([
-                    { $match: { topic: sec.topic, subtopic: sec.subtopic } },
-                    { $group: { _id: "$subsubtopic", qs: { $push: "$$ROOT" } } },
-                    { $sample: { size: 1 } }
-                ]);
-                if (passage.length > 0) paper.push(...passage[0].qs.slice(0, sec.count));
-            } else if (sec.isOral) {
-                // Pick by 'subsubtopic' (Types like Rhymes, Vowels)
-                const types = await Question.distinct("subsubtopic", { subtopic: "Oral Forms" });
-                for (let t of types) {
-                    const q = await Question.aggregate([
-                        { $match: { subtopic: "Oral Forms", subsubtopic: t } }, 
-                        { $sample: { size: 1 } }
-                    ]);
-                    if (q.length > 0) paper.push(q[0]);
-                    if (paper.length >= 60) break; // Don't exceed JAMB total
+            // Check if this subtopic requires a passage (Comprehension/Cloze)
+            const needsPassage = ["Comprehension Passage", "Cloze Passage"].includes(dist.subTopic);
+
+            if (needsPassage) {
+                // 1. Find all available 'subsubtopics' (which represent unique passages)
+                const passages = await Question.distinct("subsubtopic", { 
+                    subject: "Use of English",
+                    subtopic: dist.subTopic 
+                });
+
+                if (passages.length > 0) {
+                    // 2. Pick one random passage ID (subsubtopic)
+                    const randomPassageId = passages[Math.floor(Math.random() * passages.length)];
+                    
+                    // 3. Fetch all questions linked to that specific passage
+                    const passageQuestions = await Question.find({ 
+                        subject: "Use of English",
+                        subtopic: dist.subTopic,
+                        subsubtopic: randomPassageId
+                    }).sort({ _id: 1 }); // Keeps questions in order (Q1, Q2, Q3...)
+
+                    // 4. Add to paper (up to the quantity specified in config)
+                    paper.push(...passageQuestions.slice(0, dist.qty));
                 }
             } else {
-                // General Lexis Structure
+                // General Lexis, Structure, or Oral Forms (No Passage)
                 const qs = await Question.aggregate([
-                    { $match: { topic: sec.topic, subtopic: sec.subtopic } },
-                    { $sample: { size: sec.count } }
+                    { $match: { 
+                        subject: "Use of English", 
+                        subtopic: dist.subTopic // Matches "Antonyms", "Synonyms", etc.
+                    }},
+                    { $sample: { size: dist.qty } }
                 ]);
+                
                 if (qs.length > 0) paper.push(...qs);
             }
         } catch (e) {
-            // Log the error but DON'T stop the loop
-            console.error(`Skipping section ${sec.subtopic}: Not enough questions in DB.`);
+            console.error(`Error fetching ${dist.subTopic}:`, e);
         }
     }
     return paper;
@@ -426,26 +404,25 @@ async function getEnglishPaper(batchId) {
 
 app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
     try {
-      const { examId } = req.params;
-        const exam = await Exam.findById(examId).populate('userId');
+        const { examId } = req.params;
+        const session = await Exam.findById(examId).populate('userId');
         
-        if (!exam) return res.status(404).json({ error: "Exam session not found" });
+        if (!session) return res.status(404).json({ error: "Exam session not found" });
 
-        // If exam has no subjects, look at the user record
-        let subjects = exam.subjectCombination;
-        if (!subjects || subjects.length === 0) {
-            subjects = exam.userId.subjectCombination;
-        }
-        
+        // IMPORTANT: We need the Config ID to know the English distribution
+        // 'examId' in your Session model usually points to the ExamConfig ID
+        const configId = session.examId; 
+
+        let subjects = session.subjectCombination || session.userId.subjectCombination;
 
         const results = [];
         for (const sub of subjects) {
             let questions = [];
             if (sub === "Use of English") {
-                // Fetch the special 60 questions for English
-                questions = await getEnglishPaper(exam.batchId);
+                // Pass the CONFIG ID here
+                questions = await getEnglishPaper(configId);
             } else {
-                // Fetch 40 questions for Math, Physics, etc.
+                // Fetch 40 questions for other subjects
                 questions = await Question.aggregate([
                     { $match: { subject: sub } },
                     { $sample: { size: 40 } }
@@ -456,14 +433,15 @@ app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
                 subject: sub,
                 questions: questions.map(q => ({
                     ...q,
+                    // English questions shouldn't shuffle options if they are Comprehension/Oral?
+                    // Usually safer to shuffle though.
                     options: q.options ? [...q.options].sort(() => 0.5 - Math.random()) : []
                 }))
             });
         }
         res.json(results);
     } catch (err) {
-        console.error("Fetch Questions Error:", err);
-        res.status(500).json({ error: "Server failed to load subjects: " + err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
