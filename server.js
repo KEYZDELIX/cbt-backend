@@ -571,32 +571,55 @@ app.post('/api/exams/submit-exam', async (req, res) => {
                 let correctCount = 0;
                 let earnedWeight = 0;
 
-                for (const resp of subResponses) {
-                    const q = await Question.findById(resp.questionId);
-                    if (q && q.correctOptionKey && resp.selectedOptionKey) {
-                        if (q.correctOptionKey.trim().toUpperCase() === resp.selectedOptionKey.trim().toUpperCase()) {
-                            correctCount++;
-                            earnedWeight += (q.weight || 1);
-                        }
-                    }
-                }
+                for (const subName of userSubjects) {
+    // 1. Calculate the 'Perfect Score' denominator for THIS subject
+    // We sum the weights of ALL questions belonging to this subject in the database
+    const allSubjectQuestions = await Question.find({ subject: subName });
+    const totalPossibleWeight = allSubjectQuestions.reduce((acc, q) => acc + (q.weight || 1), 0);
+    
+    // Set standard JAMB question counts for raw scaling
+    const totalQsCount = subName.toLowerCase().includes('english') ? 60 : 40;
 
-                const totalQs = subName.toLowerCase().includes('english') ? 60 : 40;
-                const wScore1 = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
-                const rScore1 = (correctCount / totalQs) * 100;
+    // 2. Filter user's specific answers for this subject
+    const subResponses = responses.filter(r => r.subject === subName);
+    let correctCount = 0;
+    let earnedWeight = 0;
 
-                subjectResults.push({
-                    subjectName: subName,
-                    correctCount,
-                    totalQuestions: totalQs,
-                    rawScore1: rScore1,
-                    rawScore2: Math.round(rScore1),
-                    weightedScore1: wScore1,
-                    weightedScore2: Math.round(wScore1),
-                    normalizedScore1: 0,
-                    normalizedScore2: 0
-                });
+    // 3. Mark the answers
+    for (const resp of subResponses) {
+        const q = await Question.findById(resp.questionId);
+        
+        if (q && q.correctOptionKey) {
+            const dbAns = q.correctOptionKey.trim().toUpperCase();
+            const userAns = resp.selectedOptionKey.trim().toUpperCase();
+
+            if (dbAns === userAns) {
+                correctCount++;
+                // Add the specific weight of THIS question (default to 1 if missing)
+                earnedWeight += (q.weight || 1);
             }
+        }
+    }
+
+    // 4. Calculate final percentages
+    // weightedScore1 = (Sum of Earned Weights / Sum of All Available Weights) * 100
+    const wScore1 = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
+    
+    // rawScore1 = (Number of Correct Answers / Total Questions Expected) * 100
+    const rScore1 = (correctCount / totalQsCount) * 100;
+
+    subjectResults.push({
+        subjectName: subName,
+        correctCount,
+        totalQuestions: totalQsCount,
+        rawScore1: rScore1,
+        rawScore2: Math.round(rScore1),
+        weightedScore1: wScore1, 
+        weightedScore2: Math.round(wScore1),
+        normalizedScore1: 0, 
+        normalizedScore2: 0
+    });
+}
 
             const totalRaw = subjectResults.reduce((acc, s) => acc + s.rawScore2, 0);
             const totalWeighted = subjectResults.reduce((acc, s) => acc + s.weightedScore2, 0);
