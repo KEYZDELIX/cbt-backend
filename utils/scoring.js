@@ -35,12 +35,27 @@ exports.runNormalization = async (ResultModel, targetExamId) => {
             const x_prime = getMean(batchWeights);
             const S2 = getSD(batchWeights, x_prime);
 
-            // Protective Formula: If SD is 0 (first student), normalized = weighted
+            // 1. Calculate the raw normalized value
             let norm1 = (S2 < 0.001) ? x : ((S1 * (x - x_prime)) / S2) + globalMean;
             
-            sub.normalizedScore1 = isNaN(norm1) ? x : norm1;
-            sub.normalizedScore2 = Math.round(sub.normalizedScore1);
-            normSum += sub.normalizedScore1;
+            // Handle NaN cases if they arise from bad data
+            if (isNaN(norm1)) norm1 = x;
+
+            // 2. THE SAFETY CLAMP (10 - 99)
+            // If the score is too low, we set a floor of 10 plus a tiny 
+            // percentage of their raw score to maintain ranking order.
+            if (norm1 < 10) {
+                norm1 = 10 + (x * 0.05); 
+            }
+
+            // Cap the maximum at 99
+            if (norm1 > 99) {
+                norm1 = 99;
+            }
+
+            sub.normalizedScore1 = norm1;
+            sub.normalizedScore2 = Math.round(norm1);
+            normSum += norm1;
         });
 
         res.aggregateScore = Math.round(normSum);
