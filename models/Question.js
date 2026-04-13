@@ -35,7 +35,7 @@ const QuestionSchema = new mongoose.Schema({
   weight: { 
     type: Number, 
     default: 1, 
-    min: 0.5, 
+    min: 1, 
     max: 2.0 
   },
   explanation: { type: String },

@@ -532,71 +532,82 @@ app.post('/api/exams/submit-exam', async (req, res) => {
     try {
         const { userId, examId, responses, subjectAnalysis, totalSecondsRemaining, status } = req.body;
 
-        if (!userId || !examId) return res.status(400).json({ error: "Missing IDs" });
-
-        // 1. Update Exam Record
         const updatedExam = await Exam.findOneAndUpdate(
             { _id: examId, userId },
             { $set: { responses, subjectAnalysis, totalSecondsRemaining, status, 
               endTime: (status === 'submitted' || status === 'timed-out') ? new Date() : null } },
             { new: true }
         );
-// 2. If finished, calculate the "Raw" counts
+
         if (status === 'submitted' || status === 'timed-out') {
             const subjectResults = [];
-            
-            // Get all unique subject names from the responses
-            const subjects = [...new Set(responses.map(r => r.subject))];
+            const userSubjects = updatedExam.subjectCombination || ["Use of English", "Mathematics", "Physics", "Chemistry"];
 
-            for (const subName of subjects) {
+            for (const subName of userSubjects) {
                 const subResponses = responses.filter(r => r.subject === subName);
                 let correctCount = 0;
+                let totalPossibleWeight = 0; // To calculate the denominator
+                let earnedWeight = 0;        // To calculate the numerator
 
-                // Compare each response to the database answer
+                // 1. Get all questions for this subject to know the total weight
+                const questionsInSub = await Question.find({ subject: subName });
+                totalPossibleWeight = questionsInSub.reduce((acc, q) => acc + (q.weight || 1), 0);
+                const totalQuestions = subName.toLowerCase().includes('english') ? 60 : 40;
+
+                // 2. Marking Loop
                 for (const resp of subResponses) {
                     const q = await Question.findById(resp.questionId);
-                    if (q && q.correctOption === resp.selectedOptionKey) {
-                        correctCount++;
+                    
+                    if (q && q.correctOptionKey) {
+                        const dbAns = q.correctOptionKey.toString().trim().toUpperCase();
+                        const userAns = resp.selectedOptionKey.toString().trim().toUpperCase();
+
+                        if (dbAns === userAns) {
+                            correctCount++;
+                            earnedWeight += (q.weight || 1);
+                        }
                     }
                 }
-             const totalQuestions = subName.toLowerCase() === 'english' ? 60 : 40;
-                const raw1 = (correctCount / totalQuestions) * 100;
+
+                // Calculation: (Earned Weight / Total Possible Weight) * 100
+                // This ensures that even if questions have different weights (e.g., 1.5 vs 1.0), it scales to 100
+                const wScore1 = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
+                const rScore1 = (correctCount / totalQuestions) * 100;
                 
                 subjectResults.push({
                     subjectName: subName,
                     correctCount: correctCount,
                     totalQuestions: totalQuestions,
-                    rawScore1: raw1,
-                    rawScore2: Math.round(raw1),
-                    weightedScore1: raw1, // Your 'x' for later normalization
-                    weightedScore2: Math.round(raw1)
+                    rawScore1: rScore1,
+                    rawScore2: Math.round(rScore1),
+                    weightedScore1: wScore1, 
+                    weightedScore2: Math.round(wScore1),
+                    normalizedScore1: 0, 
+                    normalizedScore2: 0
                 });
             }
 
-            // Create/Update the Result document
             const finalResult = await Result.findOneAndUpdate(
                 { userId, examId },
-                { 
-                    userId, examId, 
-                    subjectResults, 
-                    timeTaken: 7200 - totalSecondsRemaining 
-                },
+                { userId, examId, subjectResults, timeTaken: 7200 - totalSecondsRemaining },
                 { upsert: true, new: true }
             );
-          // Run normalization silently in background (updates the DB)
-            runNormalization(Result).catch(e => console.error("Normalization Error:", e));
 
-            // Return the correctCount data for the frontend to show immediately
+            // Run Normalization using weightedScore1 (x)
+            await runNormalization(Result);
+
+            const refreshedResult = await Result.findById(finalResult._id);
+
             return res.json({ 
                 success: true, 
                 status: "finished", 
-                data: finalResult 
+                data: refreshedResult 
             });
         }
 
         res.json({ success: true, status: "active" });
-
     } catch (err) {
+        console.error("Submission Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
