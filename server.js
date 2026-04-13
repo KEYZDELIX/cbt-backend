@@ -563,14 +563,6 @@ app.post('/api/exams/submit-exam', async (req, res) => {
             const subjectResults = [];
             const userSubjects = updatedExam.subjectCombination || [];
 
-            for (const subName of userSubjects) {
-                const questionsInDb = await Question.find({ subject: subName });
-                const totalPossibleWeight = questionsInDb.reduce((acc, q) => acc + (q.weight || 1), 0);
-                
-                const subResponses = responses.filter(r => r.subject === subName);
-                let correctCount = 0;
-                let earnedWeight = 0;
-
                 for (const subName of userSubjects) {
     // 1. Calculate the 'Perfect Score' denominator for THIS subject
     // We sum the weights of ALL questions belonging to this subject in the database
