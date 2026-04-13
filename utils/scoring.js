@@ -44,8 +44,8 @@ exports.runNormalization = async (ResultModel, targetExamId) => {
             // 2. THE SAFETY CLAMP (10 - 99)
             // If the score is too low, we set a floor of 10 plus a tiny 
             // percentage of their raw score to maintain ranking order.
-            if (norm1 < 10) {
-                norm1 = 10 + (x * 0.05); 
+            if (norm1 < 8) {
+                norm1 = 8 + (x * 0.05); 
             }
 
             // Cap the maximum at 99
