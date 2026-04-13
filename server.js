@@ -797,21 +797,8 @@ app.delete('/api/exams/:id', async (req, res) => {
         res.status(500).json({ error: "Delete operation failed" });
     }
 });
-// RESET EXAM PROGRESS (Clears assigned student records if needed)
-app.post('/api/exams/reset/:id', async (req, res) => {
-    try {
-        // This is where you would also clear a "Results" collection if you have one
-        // For now, we just ensure the Exam config remains but is ready for a fresh start
-        const exam = await ExamConfig.findById(req.params.id);
-        if (!exam) return res.status(404).json({ error: "Exam not found" });
 
-        // Logic: You can either clear assignedStudents or just return a success
-        // if you use a separate "UserExamSession" collection.
-        res.json({ message: "Exam sessions have been reset for this configuration." });
-    } catch (err) {
-        res.status(500).json({ error: "Reset failed" });
-    }
-});
+
 
 // SEARCH USERS (First, Middle, Last)
 app.get('/api/students/search', async (req, res) => {
@@ -881,43 +868,62 @@ app.get('/api/exams/attempts/:examId', async (req, res) => {
 // POST: Reset exam progress
 app.post('/api/exams/reset/:examId', async (req, res) => {
     try {
-        const { examId } = req.params;
+        const { examId } = req.params; // This is the ExamConfig ID
         const { type, regNumbers } = req.body;
 
-        let query = { "examAllocations.examId": examId };
-        
-        // If 'selected', we filter by the specific regNumbers provided
+        console.log(`Starting reset for Exam: ${examId}, Type: ${type}`);
+
+        // 1. Identify target users
+        let userQuery = {};
         if (type === 'selected') {
-            query.regNo = { $in: regNumbers };
+            userQuery.regNo = { $in: regNumbers };
+        } else {
+            // If 'all', we find everyone who has this exam in their allocations
+            userQuery = { "examAllocations.examId": examId };
         }
 
-        // 1. Find the target users
-        const targetUsers = await User.find(query);
+        const targetUsers = await User.find(userQuery);
         const userIds = targetUsers.map(u => u._id);
+        
+        console.log(`Found ${userIds.length} users to reset.`);
 
-        // 2. Wipe Result records
-        await Result.deleteMany({ 
+        if (userIds.length === 0) {
+            return res.status(404).json({ message: "No users found to reset." });
+        }
+
+        // 2. Wipe Result records & Exam Sessions
+        // We use $in to catch everyone at once
+        const resDelete = await Result.deleteMany({ 
             examId: examId, 
             userId: { $in: userIds } 
         });
 
-        // 3. Wipe Active/Past Exam Sessions
-        await Exam.deleteMany({ 
+        const examDelete = await Exam.deleteMany({ 
             examId: examId, 
             userId: { $in: userIds } 
         });
 
-        // 4. Reset the 'hasTaken' flag in User Allocations
-        // We use positional filtered positional operator $[elem] to update the specific allocation
-        await User.updateMany(
-            { _id: { $in: userIds } },
-            { $set: { "examAllocations.$[elem].hasTaken": false } },
-            { arrayFilters: [{ "elem.examId": examId }] }
+        console.log(`Deleted Results: ${resDelete.deletedCount}, Deleted Sessions: ${examDelete.deletedCount}`);
+
+        // 3. Reset the 'hasTaken' flag
+        // We update the User records where the allocation matches the examId
+        const userUpdate = await User.updateMany(
+            { 
+                _id: { $in: userIds },
+                "examAllocations.examId": examId 
+            },
+            { $set: { "examAllocations.$.hasTaken": false } }
         );
 
-        res.json({ success: true, message: `Reset completed for ${userIds.length} students.` });
+        console.log(`Updated User Flags: ${userUpdate.modifiedCount}`);
+
+        res.json({ 
+            success: true, 
+            message: `Reset ${userIds.length} students. Results cleared: ${resDelete.deletedCount}` 
+        });
+
     } catch (err) {
-        console.error("Reset Error:", err);
+        console.error("Reset Route Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
