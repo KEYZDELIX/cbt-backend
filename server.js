@@ -558,8 +558,7 @@ app.post('/api/exams/submit-exam', async (req, res) => {
               endTime: (status === 'submitted' || status === 'timed-out') ? new Date() : null } },
             { new: true }
         );
-
-        for (const subName of userSubjects) {
+for (const subName of userSubjects) {
     // 1. Determine expected total count
     const isEnglish = subName.toLowerCase().includes('english');
     const expectedTotal = isEnglish ? 60 : 40;
@@ -615,6 +614,7 @@ app.post('/api/exams/submit-exam', async (req, res) => {
         normalizedScore2: 0
     });
 }
+        
 
             const totalRaw = subjectResults.reduce((acc, s) => acc + s.rawScore2, 0);
             const totalWeighted = subjectResults.reduce((acc, s) => acc + s.weightedScore2, 0);
