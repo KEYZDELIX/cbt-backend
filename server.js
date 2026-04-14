@@ -348,102 +348,98 @@ const currentAllocation = user.examAllocations.find(alloc => {
 
 async function getEnglishPaper(examConfigId) {
     const paper = [];
-    const ExamConfig = require('./models/ExamConfig'); // Adjust path as needed
+    const ExamConfig = require('./models/ExamConfig');
     const config = await ExamConfig.findById(examConfigId);
 
-    if (!config || !config.englishDist || config.englishDist.length === 0) {
-        console.error("No English distribution found in config!");
-        return [];
-    }
+    if (!config || !config.englishDist || config.englishDist.length === 0) return [];
 
-    // Loop through each rule set in the config (e.g., Section A -> Cloze -> 10 questions)
+    // We use a specific order for the sections to mimic JAMB
     for (const dist of config.englishDist) {
         try {
-            // Check if this subtopic requires a passage (Comprehension/Cloze)
-            const needsPassage = ["Comprehension Passage", "Cloze Passage"].includes(dist.subTopic);
+            const isPassage = ["Comprehension Passage", "Cloze Passage"].includes(dist.subTopic);
 
-            if (needsPassage) {
-                // 1. Find all available 'subsubtopics' (which represent unique passages)
+            if (isPassage) {
+                // Pick ONE unique passage (subsubtopic)
                 const passages = await Question.distinct("subsubtopic", { 
                     subject: "Use of English",
                     subtopic: dist.subTopic 
                 });
 
                 if (passages.length > 0) {
-                    // 2. Pick one random passage ID (subsubtopic)
                     const randomPassageId = passages[Math.floor(Math.random() * passages.length)];
-                    
-                    // 3. Fetch all questions linked to that specific passage
                     const passageQuestions = await Question.find({ 
                         subject: "Use of English",
                         subtopic: dist.subTopic,
                         subsubtopic: randomPassageId
-                    }).sort({ _id: 1 }); // Keeps questions in order (Q1, Q2, Q3...)
+                    }).sort({ _id: 1 }); // Sequential order for the story/passage
 
-                    // 4. Add to paper (up to the quantity specified in config)
                     paper.push(...passageQuestions.slice(0, dist.qty));
                 }
             } else {
-                // General Lexis, Structure, or Oral Forms (No Passage)
+                // For Lexis/Oral: Fetch unique questions and shuffle them INTERNALLY
                 const qs = await Question.aggregate([
                     { $match: { 
                         subject: "Use of English", 
-                        subtopic: dist.subTopic // Matches "Antonyms", "Synonyms", etc.
+                        subtopic: dist.subTopic 
                     }},
-                    { $sample: { size: dist.qty } }
+                    { $sample: { size: dist.qty } } // Mongo's $sample avoids duplicates naturally
                 ]);
                 
                 if (qs.length > 0) paper.push(...qs);
             }
         } catch (e) {
-            console.error(`Error fetching ${dist.subTopic}:`, e);
+            console.error(`Error in English Section ${dist.subTopic}:`, e);
         }
     }
-    return paper;
+    // DO NOT shuffle the 'paper' array here. 
+    // Keeping it as is preserves the subtopic grouping from the loop.
+    return paper; 
 }
-
 app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
     try {
         const { examId } = req.params;
         const session = await Exam.findById(examId).populate('userId');
-        
-        if (!session) return res.status(404).json({ error: "Exam session not found" });
-
-        // IMPORTANT: We need the Config ID to know the English distribution
-        // 'examId' in your Session model usually points to the ExamConfig ID
         const configId = session.examId; 
 
         let subjects = session.subjectCombination || session.userId.subjectCombination;
-
         const results = [];
+
         for (const sub of subjects) {
             let questions = [];
+            
             if (sub === "Use of English") {
-                // Pass the CONFIG ID here
                 questions = await getEnglishPaper(configId);
+                
+                // IMPORTANT: For English, we only shuffle OPTIONS, not question order
+                results.push({
+                    subject: sub,
+                    questions: questions.map(q => ({
+                        ...q._doc, // Use _doc to get clean data from Mongoose
+                        options: q.options ? [...q.options].sort(() => 0.5 - Math.random()) : []
+                    }))
+                });
             } else {
-                // Fetch 40 questions for other subjects
+                // For Math/Physics: Full Question & Option Shuffling
                 questions = await Question.aggregate([
                     { $match: { subject: sub } },
                     { $sample: { size: 40 } }
                 ]);
-            }
 
-            results.push({
-                subject: sub,
-                questions: questions.map(q => ({
-                    ...q,
-                    // English questions shouldn't shuffle options if they are Comprehension/Oral?
-                    // Usually safer to shuffle though.
-                    options: q.options ? [...q.options].sort(() => 0.5 - Math.random()) : []
-                }))
-            });
+                results.push({
+                    subject: sub,
+                    questions: questions.map(q => ({
+                        ...q,
+                        options: q.options ? [...q.options].sort(() => 0.5 - Math.random()) : []
+                    }))
+                });
+            }
         }
         res.json(results);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 
 app.post('/api/exams/start-exam', async (req, res) => {
