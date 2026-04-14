@@ -395,12 +395,15 @@ async function getEnglishPaper(examConfigId) {
     // Keeping it as is preserves the subtopic grouping from the loop.
     return paper; 
 }
+
 app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
     try {
         const { examId } = req.params;
         const session = await Exam.findById(examId).populate('userId');
-        const configId = session.examId; 
+        
+        if (!session) return res.status(404).json({ error: "Exam session not found" });
 
+        const configId = session.examId; 
         let subjects = session.subjectCombination || session.userId.subjectCombination;
         const results = [];
 
@@ -408,37 +411,46 @@ app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
             let questions = [];
             
             if (sub === "Use of English") {
-                questions = await getEnglishPaper(configId);
+                // Fetch grouped English questions
+                const rawEnglish = await getEnglishPaper(configId);
                 
-                // IMPORTANT: For English, we only shuffle OPTIONS, not question order
-                results.push({
-                    subject: sub,
-                    questions: questions.map(q => ({
-                        ...q._doc, // Use _doc to get clean data from Mongoose
-                        options: q.options ? [...q.options].sort(() => 0.5 - Math.random()) : []
-                    }))
+                questions = rawEnglish.map(q => {
+                    // Convert Mongoose Doc to Plain Object to fix 'undefined' properties
+                    const plainQ = q.toObject ? q.toObject() : q;
+                    return {
+                        ...plainQ,
+                        // Ensure questionText is present even if stored as 'question'
+                        questionText: plainQ.questionText || plainQ.question,
+                        // Shuffle options internally
+                        options: plainQ.options ? [...plainQ.options].sort(() => 0.5 - Math.random()) : []
+                    };
                 });
             } else {
-                // For Math/Physics: Full Question & Option Shuffling
-                questions = await Question.aggregate([
+                // For Math/Physics: Use Aggregate for random sampling
+                const rawScience = await Question.aggregate([
                     { $match: { subject: sub } },
                     { $sample: { size: 40 } }
                 ]);
 
-                results.push({
-                    subject: sub,
-                    questions: questions.map(q => ({
-                        ...q,
-                        options: q.options ? [...q.options].sort(() => 0.5 - Math.random()) : []
-                    }))
-                });
+                questions = rawScience.map(q => ({
+                    ...q,
+                    questionText: q.questionText || q.question,
+                    options: q.options ? [...q.options].sort(() => 0.5 - Math.random()) : []
+                }));
             }
+
+            results.push({
+                subject: sub,
+                questions: questions
+            });
         }
         res.json(results);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error("Fetch Questions Error:", err);
+        res.status(500).json({ error: "Failed to load subjects: " + err.message });
     }
 });
+
 
 
 
