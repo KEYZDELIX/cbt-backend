@@ -353,46 +353,48 @@ async function getEnglishPaper(examConfigId) {
 
     if (!config || !config.englishDist || config.englishDist.length === 0) return [];
 
-    // We use a specific order for the sections to mimic JAMB
+    // Loop through the distribution rules set in the Admin Config
     for (const dist of config.englishDist) {
         try {
-            const isPassage = ["Comprehension Passage", "Cloze Passage"].includes(dist.subTopic);
+            // Note: DB screenshot shows 'Cloze Passage' is in the 'subTopic' field
+            const isPassageTopic = ["Comprehension Passages", "Cloze Passage"].includes(dist.topic);
 
-            if (isPassage) {
-                // Pick ONE unique passage (subsubtopic)
-                const passages = await Question.distinct("subsubtopic", { 
+            if (isPassageTopic) {
+                // Find distinct passages (subSubTopic in your DB)
+                const passages = await Question.distinct("subSubTopic", { 
                     subject: "Use of English",
-                    subtopic: dist.subTopic 
+                    subTopic: dist.topic 
                 });
 
                 if (passages.length > 0) {
-                    const randomPassageId = passages[Math.floor(Math.random() * passages.length)];
+                    // Pick one random passage
+                    const selectedPassage = passages[Math.floor(Math.random() * passages.length)];
+                    
                     const passageQuestions = await Question.find({ 
                         subject: "Use of English",
-                        subtopic: dist.subTopic,
-                        subsubtopic: randomPassageId
-                    }).sort({ _id: 1 }); // Sequential order for the story/passage
+                        subTopic: dist.topic,
+                        subSubTopic: selectedPassage
+                    }).sort({ _id: 1 }); // Keeps the sequence of the story
 
+                    // Push only available questions, up to the qty requested
                     paper.push(...passageQuestions.slice(0, dist.qty));
                 }
             } else {
-                // For Lexis/Oral: Fetch unique questions and shuffle them INTERNALLY
+                // For Lexis, Antonyms, etc.
                 const qs = await Question.aggregate([
                     { $match: { 
                         subject: "Use of English", 
-                        subtopic: dist.subTopic 
+                        subTopic: dist.topic 
                     }},
-                    { $sample: { size: dist.qty } } // Mongo's $sample avoids duplicates naturally
+                    { $sample: { size: dist.qty } }
                 ]);
                 
                 if (qs.length > 0) paper.push(...qs);
             }
         } catch (e) {
-            console.error(`Error in English Section ${dist.subTopic}:`, e);
+            console.error(`Error in English Section ${dist.topic}:`, e);
         }
     }
-    // DO NOT shuffle the 'paper' array here. 
-    // Keeping it as is preserves the subtopic grouping from the loop.
     return paper; 
 }
 

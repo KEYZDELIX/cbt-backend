@@ -7,13 +7,13 @@ const getSD = (arr, mean) => {
 };
 
 exports.runNormalization = async (ResultModel, targetExamId) => {
-    // Only fetch results for this specific exam session
     const allResults = await ResultModel.find({ examId: targetExamId });
     if (allResults.length === 0) return;
 
-    const S1 = 15; // Target SD (JAMB Constant)
+    const S1 = 15; // Target SD
+    const totalCandidates = allResults.length;
 
-    // Calculate Global Mean across this specific exam
+    // Calculate Global Mean
     let totalWeights = 0;
     let count = 0;
     allResults.forEach(r => r.subjectResults.forEach(s => {
@@ -23,7 +23,8 @@ exports.runNormalization = async (ResultModel, targetExamId) => {
     const globalMean = count > 0 ? totalWeights / count : 0;
 
     for (let res of allResults) {
-        let normSum = 0;
+        let normSumForRanking = 0;
+        let integerAggregate = 0; // Sum of rounded scores
 
         res.subjectResults.forEach(sub => {
             const x = sub.weightedScore1 || 0;
@@ -35,31 +36,36 @@ exports.runNormalization = async (ResultModel, targetExamId) => {
             const x_prime = getMean(batchWeights);
             const S2 = getSD(batchWeights, x_prime);
 
-            // 1. Calculate the raw normalized value
-            let norm1 = (S2 < 0.001) ? x : ((S1 * (x - x_prime)) / S2) + globalMean;
+            // 1. Calculate Standard Normalization
+            let norm1 = (S2 < 2) ? x : ((S1 * (x - x_prime)) / S2) + globalMean;
+
+            // 2. HYBRID FAIRNESS LOGIC
+            // If few candidates, lean 70% on actual performance, 30% on curve.
+            // If many candidates (50+), lean 100% on curve.
+            const curveWeight = Math.min(totalCandidates / 50, 1); 
+            const actualWeight = 1 - curveWeight;
             
-            // Handle NaN cases if they arise from bad data
-            if (isNaN(norm1)) norm1 = x;
+            let balancedNorm = (x * actualWeight) + (norm1 * curveWeight);
 
-            // 2. THE SAFETY CLAMP (10 - 99)
-            // If the score is too low, we set a floor of 10 plus a tiny 
-            // percentage of their raw score to maintain ranking order.
-            if (norm1 < 8) {
-                norm1 = 8 + (x * 0.05); 
-            }
+            // 3. THE "FAIRNESS BUFFER" (Max +/- 15 points from raw score)
+            if (balancedNorm > x + 15) balancedNorm = x + 15;
+            if (balancedNorm < x - 15) balancedNorm = x - 15;
 
-            // Cap the maximum at 99
-            if (norm1 > 99) {
-                norm1 = 99;
-            }
+            // 4. CLAMPS (8 - 99.4)
+            if (balancedNorm < 8) balancedNorm = 8 + (x * 0.05);
+            if (balancedNorm >= 99.5) balancedNorm = 99.4 + (Math.min(x, 100) * 0.0009);
 
-            sub.normalizedScore1 = norm1;
-            sub.normalizedScore2 = Math.round(norm1);
-            normSum += norm1;
+            sub.normalizedScore1 = balancedNorm;
+            sub.normalizedScore2 = Math.round(balancedNorm);
+            
+            // Add rounded integer to the display aggregate
+            integerAggregate += sub.normalizedScore2;
+            // Add precise float to the ranking sum
+            normSumForRanking += balancedNorm;
         });
 
-        res.aggregateScore = Math.round(normSum);
-        res.preciseRankingScore = parseFloat(normSum.toFixed(3));
+        res.aggregateScore = integerAggregate; // Sum of rounded whole numbers
+        res.preciseRankingScore = parseFloat(normSumForRanking.toFixed(3));
         
         await res.save();
     }
