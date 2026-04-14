@@ -353,34 +353,36 @@ async function getEnglishPaper(examConfigId) {
 
     if (!config || !config.englishDist || config.englishDist.length === 0) return [];
 
-    // Loop through the distribution rules set in the Admin Config
+    // Helper to shuffle questions within a specific block
+    const shuffle = (array) => array.sort(() => Math.random() - 0.5);
+
     for (const dist of config.englishDist) {
         try {
-            // Note: DB screenshot shows 'Cloze Passage' is in the 'subTopic' field
+            // Match the topic from your config (e.g., "Cloze Passage")
             const isPassageTopic = ["Comprehension Passages", "Cloze Passage"].includes(dist.topic);
 
             if (isPassageTopic) {
-                // Find distinct passages (subSubTopic in your DB)
                 const passages = await Question.distinct("subSubTopic", { 
                     subject: "Use of English",
                     subTopic: dist.topic 
                 });
 
                 if (passages.length > 0) {
-                    // Pick one random passage
                     const selectedPassage = passages[Math.floor(Math.random() * passages.length)];
-                    
                     const passageQuestions = await Question.find({ 
                         subject: "Use of English",
                         subTopic: dist.topic,
                         subSubTopic: selectedPassage
-                    }).sort({ _id: 1 }); // Keeps the sequence of the story
+                    });
 
-                    // Push only available questions, up to the qty requested
-                    paper.push(...passageQuestions.slice(0, dist.qty));
+                    // For Passages: We usually keep them in order (1, 2, 3...) 
+                    // so the flow of the story makes sense.
+                    const orderedPassageQs = passageQuestions.sort((a, b) => a._id - b._id);
+                    paper.push(...orderedPassageQs.slice(0, dist.qty));
                 }
             } else {
-                // For Lexis, Antonyms, etc.
+                // For Lexis, Structure, Oral: 
+                // We fetch the requested quantity and then SHUFFLE them.
                 const qs = await Question.aggregate([
                     { $match: { 
                         subject: "Use of English", 
@@ -389,7 +391,12 @@ async function getEnglishPaper(examConfigId) {
                     { $sample: { size: dist.qty } }
                 ]);
                 
-                if (qs.length > 0) paper.push(...qs);
+                if (qs.length > 0) {
+                    // Shuffle this specific batch so Student A and B 
+                    // see "Antonyms" in a different order.
+                    const shuffledBatch = shuffle(qs);
+                    paper.push(...shuffledBatch);
+                }
             }
         } catch (e) {
             console.error(`Error in English Section ${dist.topic}:`, e);
@@ -398,58 +405,80 @@ async function getEnglishPaper(examConfigId) {
     return paper; 
 }
 
+// Helper to generate a batch-specific random pool with controlled overlap
+function getBatchPool(allQuestions, batchNum, questionsPerStudent) {
+    const totalAvailable = allQuestions.length;
+    // We want a pool size that gives variety but stays batch-consistent
+    // Ideally 1.5x the number of questions a student needs
+    const poolSize = Math.min(totalAvailable, Math.floor(questionsPerStudent * 1.5));
+    
+    // Use the batchNum to create a 'seeded' shuffle
+    // This ensures every student in Batch 1 sees the SAME pool
+    const seededShuffle = (arr, seed) => {
+        let m = arr.length, t, i;
+        while (m) {
+            i = Math.floor(Math.abs(Math.sin(seed++) * m--));
+            t = arr[m];
+            arr[m] = arr[i];
+            arr[i] = t;
+        }
+        return arr;
+    };
+
+    // Shuffle the entire bank based on Batch Number
+    const batchSpecificOrderedBank = seededShuffle([...allQuestions], batchNum * 123);
+    
+    // Take the first 'poolSize' questions. 
+    // Because of the seed, Batch 1 and Batch 2 will have different starting orders
+    // and therefore different pools, but with natural overlap.
+    return batchSpecificOrderedBank.slice(0, poolSize);
+}
+
 app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
     try {
         const { examId } = req.params;
         const session = await Exam.findById(examId).populate('userId');
-        
-        if (!session) return res.status(404).json({ error: "Exam session not found" });
+        const config = await ExamConfig.findById(session.examId);
+        const batchNumber = session.batchId || 1;
 
-        const configId = session.examId; 
         let subjects = session.subjectCombination || session.userId.subjectCombination;
         const results = [];
 
         for (const sub of subjects) {
-            let questions = [];
-            
+            const qtyNeeded = sub === "Use of English" ? 60 : 40;
+            let finalQuestions = [];
+
             if (sub === "Use of English") {
-                // Fetch grouped English questions
-                const rawEnglish = await getEnglishPaper(configId);
+                // English follows the Sectional Flow logic we built earlier
+                finalQuestions = await getEnglishPaper(config._id);
+            } else {
+                const allSubQuestions = await Question.find({ subject: sub });
                 
-                questions = rawEnglish.map(q => {
-                    // Convert Mongoose Doc to Plain Object to fix 'undefined' properties
-                    const plainQ = q.toObject ? q.toObject() : q;
+                // 1. Generate the Pool for this specific Batch
+                const batchPool = getBatchPool(allSubQuestions, batchNumber, qtyNeeded);
+
+                // 2. Pull the student's specific set from that Batch Pool
+                // We use standard random shuffle here so students in the same batch 
+                // have different orders and slightly different questions
+                const studentSet = batchPool
+                    .sort(() => Math.random() - 0.5)
+                    .slice(0, qtyNeeded);
+
+                finalQuestions = studentSet.map(q => {
+                    const plainQ = q.toObject();
                     return {
                         ...plainQ,
-                        // Ensure questionText is present even if stored as 'question'
                         questionText: plainQ.questionText || plainQ.question,
-                        // Shuffle options internally
                         options: plainQ.options ? [...plainQ.options].sort(() => 0.5 - Math.random()) : []
                     };
                 });
-            } else {
-                // For Math/Physics: Use Aggregate for random sampling
-                const rawScience = await Question.aggregate([
-                    { $match: { subject: sub } },
-                    { $sample: { size: 40 } }
-                ]);
-
-                questions = rawScience.map(q => ({
-                    ...q,
-                    questionText: q.questionText || q.question,
-                    options: q.options ? [...q.options].sort(() => 0.5 - Math.random()) : []
-                }));
             }
 
-            results.push({
-                subject: sub,
-                questions: questions
-            });
+            results.push({ subject: sub, questions: finalQuestions });
         }
         res.json(results);
     } catch (err) {
-        console.error("Fetch Questions Error:", err);
-        res.status(500).json({ error: "Failed to load subjects: " + err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
