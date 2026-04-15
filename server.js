@@ -32,11 +32,15 @@ const upload = multer({ storage: storage });
 // Initialize Transporter using Environment Variables
 const transporter = nodemailer.createTransport({
     service: 'gmail',
-    port: 587,
-    secure: false, // Must be false for 587
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true, // Use SSL
     auth: {
         user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
+        pass: process.env.EMAIL_PASS // The 16-character App Password
+    },
+    tls: {
+        rejectUnauthorized: false // Helps prevent connection drops on some servers
     }
 });
 
