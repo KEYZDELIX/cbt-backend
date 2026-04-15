@@ -537,44 +537,50 @@ app.post('/api/exams/start-exam', async (req, res) => {
 app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
     try {
         const { resultId, subject } = req.params;
-        const result = await Result.findById(resultId);
-        if (!result) return res.status(404).json({ message: "Result not found" });
-
-        // Find the specific subject object in the array
-        const subData = result.subjectResults.find(s => s.subjectName === subject);
         
-        // Fetch only the specific questions linked to this result
-        // Assuming your 'responses' array contains the questionIds
-        const questionIds = result.responses
-            .filter(r => r.subject === subject)
-            .map(r => r.questionId);
+        // 1. Find the Result
+        const result = await Result.findById(resultId);
+        if (!result) return res.status(404).json({ error: "Result not found" });
 
+        // 2. Find the Exam session using the ID stored in the result
+        // This is where the actual 'responses' array lives
+        const examSession = await Exam.findById(result.examId);
+        if (!examSession) return res.status(404).json({ error: "Exam session data missing" });
+
+        // 3. Filter responses for this specific subject
+        const subjectResponses = examSession.responses.filter(r => r.subject === subject);
+        const questionIds = subjectResponses.map(r => r.questionId);
+
+        // 4. Fetch the questions
         const questions = await Question.find({ _id: { $in: questionIds } });
 
-        const script = questionIds.map(qId => {
-            const q = questions.find(doc => doc._id.toString() === qId.toString());
-            const resp = result.responses.find(r => r.questionId.toString() === qId.toString());
-            
+        // 5. Map everything together
+        const script = subjectResponses.map(resp => {
+            const q = questions.find(doc => doc._id.toString() === resp.questionId.toString());
             return {
-                questionText: q ? (q.questionText || q.question) : "Question Deleted",
+                questionText: q ? (q.questionText || q.question) : "Question not found",
                 options: q ? q.options : [],
                 correctKey: q ? q.correctOptionKey : null,
-                selectedKey: resp ? resp.selectedOptionKey : null,
-                isCorrect: resp ? resp.isCorrect : false,
+                selectedKey: resp.selectedOptionKey,
+                isCorrect: q ? (resp.selectedOptionKey === q.correctOptionKey) : false,
                 explanation: q ? q.explanation : ""
             };
         });
 
+        // 6. Get the stats from the result's subjectResults array
+        const subStats = result.subjectResults.find(s => s.subjectName === subject) || {};
+
         res.json({
             subject,
             stats: {
-                raw: subData.rawScore,
-                weighted: subData.weightedScore1,
-                normalized: subData.normalizedScore2
+                raw: subStats.rawScore || 0,
+                weighted: subStats.weightedScore1 || 0,
+                normalized: subStats.normalizedScore2 || 0
             },
             questions: script
         });
     } catch (err) {
+        console.error("View Script Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
