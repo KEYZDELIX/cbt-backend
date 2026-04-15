@@ -997,6 +997,8 @@ app.post('/api/exams/reset/:examId', async (req, res) => {
 app.post('/api/exams/distribute-batches/:id', async (req, res) => {
     try {
         const examId = req.params.id;
+        const { clearAll } = req.body; // New: Option to reset
+        
         const exam = await ExamConfig.findById(examId);
         if (!exam) return res.status(404).json({ error: "Exam not found" });
 
@@ -1004,43 +1006,45 @@ app.post('/api/exams/distribute-batches/:id', async (req, res) => {
         const batches = exam.batchSettings;
 
         if (!batches || batches.length === 0) {
-            return res.status(400).json({ error: "No batches defined for this exam." });
+            return res.status(400).json({ error: "No batches defined." });
         }
 
-        // 1. Clear previous allocations for THIS specific exam to avoid duplicates
-        await User.updateMany(
-            { regNo: { $in: studentRegs } },
-            { $pull: { examAllocations: { examId: exam._id } } }
+        // 1. If 'clearAll' is requested, remove all allocations for this exam first
+        if (clearAll) {
+            await User.updateMany(
+                { regNo: { $in: studentRegs } },
+                { $pull: { examAllocations: { examId: exam._id } } }
+            );
+        }
+
+        // 2. Identify students who DON'T have an allocation for this exam yet
+        const users = await User.find({ regNo: { $in: studentRegs } });
+        const unassignedUsers = users.filter(u => 
+            !u.examAllocations.some(alloc => alloc.examId.toString() === examId)
         );
 
-        // 2. Shuffle students (Fisher-Yates)
-        const shuffled = [...studentRegs];
-        for (let i = shuffled.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        if (unassignedUsers.length === 0) {
+            return res.json({ message: "All students are already assigned. No changes made.", count: 0 });
         }
-// 3. Divide into batches
-        const today = new Date().toISOString().split('T')[0]; // Gets "2026-04-06"
-        const studentsPerBatch = Math.ceil(shuffled.length / batches.length);
-        
-        const updatePromises = shuffled.map((regNo, index) => {
-            const batchIdx = Math.floor(index / studentsPerBatch);
+
+        // 3. Shuffle ONLY the unassigned students
+        const shuffled = [...unassignedUsers].sort(() => Math.random() - 0.5);
+
+        // 4. Distribute across batches (filling batches evenly)
+        const updatePromises = shuffled.map((user, index) => {
+            const batchIdx = index % batches.length; // Round-robin assignment
             const b = batches[batchIdx];
 
-            // Convert "21:04" string into a real Date object for today
-            const fullStart = new Date(`${today}T${b.startTime}:00`);
-            const fullEnd = new Date(`${today}T${b.endTime}:00`);
-
-            return User.findOneAndUpdate(
-                { regNo: regNo },
+            return User.updateOne(
+                { _id: user._id },
                 { 
                     $push: { 
                         examAllocations: {
                             examId: exam._id,
                             title: exam.title,
                             batchNumber: b.batchNumber,
-                            startTime: fullStart, // Now a Date object
-                            endTime: fullEnd      // Now a Date object
+                            startTime: new Date(b.startTime), // Use saved batch date/time
+                            endTime: new Date(b.endTime)
                         } 
                     } 
                 }
@@ -1048,7 +1052,12 @@ app.post('/api/exams/distribute-batches/:id', async (req, res) => {
         });
 
         await Promise.all(updatePromises);
-        res.json({ message: "Distribution successful", count: shuffled.length, batches: batches.length });
+        res.json({ 
+            message: "Distribution successful", 
+            count: shuffled.length, 
+            batches: batches.length,
+            status: clearAll ? "Fresh distribution" : "Added unassigned students only"
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
