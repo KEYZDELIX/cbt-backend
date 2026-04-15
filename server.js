@@ -533,7 +533,9 @@ app.post('/api/exams/start-exam', async (req, res) => {
     }
 });
 
-// Optimized View Script: Shows ONLY questions the student answeredapp.get('/admin/view-script/:resultId/:subject', async (req, res) => {
+// Optimized View Script: Shows ONLY questions the student answered
+
+app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
     try {
         const { resultId, subject } = req.params;
         const result = await Result.findById(resultId);
