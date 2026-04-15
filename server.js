@@ -567,6 +567,8 @@ app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
             return {
                 questionText: q ? q.questionText : "Question data missing",
                 options: q ? q.options : [],
+                passage: q ? q.passage : "", 
+                diagram: q ? q.diagram : "",
                 correctKey: q ? q.correctOptionKey : null,
                 selectedKey: resp.selectedOptionKey,
                 // Check if correctKey matches student's selectedKey
