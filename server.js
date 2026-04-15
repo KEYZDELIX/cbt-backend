@@ -529,36 +529,50 @@ app.post('/api/exams/start-exam', async (req, res) => {
     }
 });
 
+// Optimized View Script: Shows ONLY questions the student answered
 app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
-  try {
-    const { resultId, subject } = req.params;
-    const result = await Result.findById(resultId).populate('examId');
-    if (!result) return res.status(404).json({ message: "Result not found" });
+    try {
+        const { resultId, subject } = req.params;
+        const result = await Result.findById(resultId);
+        if (!result) return res.status(404).json({ message: "Result not found" });
 
-    // Get all questions for this subject
-    const allQs = await Question.find({ subject: subject });
-    
-    // Map the student's responses to the questions
-    const script = allQs.map(q => {
-      const response = result.examId.responses.find(r => r.questionId.toString() === q._id.toString());
-      return {
-        questionText: q.questionText,
-        options: q.options,
-        correctKey: q.correctOptionKey,
-        selectedKey: response ? response.selectedOptionKey : null,
-        isCorrect: response ? response.isCorrect : false,
-        explanation: q.explanation
-      };
-    });
+        // Find the specific subject object in the array
+        const subData = result.subjectResults.find(s => s.subjectName === subject);
+        
+        // Fetch only the specific questions linked to this result
+        // Assuming your 'responses' array contains the questionIds
+        const questionIds = result.responses
+            .filter(r => r.subject === subject)
+            .map(r => r.questionId);
 
-    res.json({
-      studentName: result.userId, // You might need to populate this in the query
-      subject: subject,
-      questions: script
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+        const questions = await Question.find({ _id: { $in: questionIds } });
+
+        const script = questionIds.map(qId => {
+            const q = questions.find(doc => doc._id.toString() === qId.toString());
+            const resp = result.responses.find(r => r.questionId.toString() === qId.toString());
+            
+            return {
+                questionText: q ? (q.questionText || q.question) : "Question Deleted",
+                options: q ? q.options : [],
+                correctKey: q ? q.correctOptionKey : null,
+                selectedKey: resp ? resp.selectedOptionKey : null,
+                isCorrect: resp ? resp.isCorrect : false,
+                explanation: q ? q.explanation : ""
+            };
+        });
+
+        res.json({
+            subject,
+            stats: {
+                raw: subData.rawScore,
+                weighted: subData.weightedScore1,
+                normalized: subData.normalizedScore2
+            },
+            questions: script
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 
@@ -664,14 +678,25 @@ app.post('/api/exams/submit-exam', async (req, res) => {
 
 // 7. Admin: View All Results
 app.get('/all-results', async (req, res) => {
-  try {
-    const results = await Result.find()
-      .populate('userId', 'firstName lastName regNumber')
-      .sort({ examDate: -1 });
-    res.json(results);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    try {
+        const results = await Result.find()
+            .populate('userId', 'firstName lastName middleName regNumber') 
+            .sort({ preciseRankingScore: -1 }); // Default sort by rank
+            
+        // Map the results to ensure fields like batchId are always present
+        const cleanedResults = results.map(r => {
+            const doc = r.toObject();
+            return {
+                ...doc,
+                batchId: doc.batchId || 1, // Fallback to 1 if not set
+                aggregateScore: doc.aggregateScore || 0
+            };
+        });
+        
+        res.json(cleanedResults);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // Example Express Route
