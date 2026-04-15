@@ -1069,63 +1069,70 @@ app.post('/api/exams/distribute-batches/:id', async (req, res) => {
 
 // EMAIL EXAM SCHEDULING
 
-// Helper for Throttling
+// Helper for the delay
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// POST: Send Exam Slips via Email
 app.post('/api/exams/notify-students/:id', async (req, res) => {
     try {
         const examId = req.params.id;
-        const exam = await ExamConfig.findById(examId);
+        const { testEmail } = req.body; // New: Option to override recipient
         
-        // Find users who have an allocation for this exam
+        const exam = await ExamConfig.findById(examId);
         const users = await User.find({ "examAllocations.examId": examId });
 
         if (users.length === 0) {
-            return res.status(400).json({ error: "No students allocated. Run Shuffle first." });
+            return res.status(400).json({ error: "No students allocated." });
         }
 
-        // Respond immediately so Admin UI doesn't hang
+        // Send immediate response
         res.json({ message: `Dispatching emails to ${users.length} students...` });
 
-        // Background loop
+        // Background Loop
         for (const user of users) {
             const alloc = user.examAllocations.find(a => a.examId.toString() === examId);
+            
+            // Use testEmail if provided, otherwise use student's real email
+            const recipient = testEmail || user.email;
 
-            if (alloc && user.email) {
+            if (alloc && recipient) {
                 try {
                     await transporter.sendMail({
                         from: '"THE MATH WORKSHOP" <themathworkshop@gmail.com>',
-                        to: user.email,
+                        to: recipient,
                         subject: `Exam Schedule: ${exam.title}`,
                         html: `
-                            <div style="font-family: Arial, sans-serif; max-width: 500px; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
-                                <h2 style="color: #2563eb;">Exam Notification</h2>
+                            <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 500px; border: 1px solid #e2e8f0; padding: 25px; border-radius: 12px; color: #1e293b;">
+                                <h2 style="color: #2563eb; margin-top: 0;">Exam Login Details</h2>
                                 <p>Hello <b>${user.firstName}</b>,</p>
-                                <p>Your schedule for <b>${exam.title}</b> is ready:</p>
-                                <div style="background: #f8fafc; padding: 15px; border-radius: 5px;">
-                                    <b>Reg No:</b> ${user.regNo}<br>
-                                    <b>Password:</b> <span style="color: #dc2626; font-weight: bold;">${user.password}</span><br>
-                                    <hr style="border: 0; border-top: 1px solid #ddd; margin: 10px 0;">
-                                    <b>Batch:</b> ${alloc.batchNumber}<br>
-                                    <b>Start:</b> ${new Date(alloc.startTime).toLocaleString()}<br>
-                                    <b>End:</b> ${new Date(alloc.endTime).toLocaleString()}
+                                <p>Your schedule for the upcoming <b>${exam.title}</b> has been generated.</p>
+                                
+                                <div style="background: #f8fafc; padding: 20px; border-radius: 8px; border: 1px solid #cbd5e1;">
+                                    <table style="width: 100%; border-collapse: collapse;">
+                                        <tr><td><b>Reg No:</b></td><td>${user.regNo}</td></tr>
+                                        <tr><td><b>Password:</b></td><td style="color: #dc2626; font-weight: bold;">${user.password}</td></tr>
+                                        <tr><td colspan="2"><hr style="border:0; border-top:1px solid #ddd; margin:10px 0;"></td></tr>
+                                        <tr><td><b>Batch:</b></td><td>Batch ${alloc.batchNumber}</td></tr>
+                                        <tr><td><b>Date:</b></td><td>${new Date(alloc.startTime).toLocaleDateString('en-NG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</td></tr>
+                                        <tr><td><b>Start:</b></td><td>${new Date(alloc.startTime).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' })} (GMT+1)</td></tr>
+                                        <tr><td><b>End:</b></td><td>${new Date(alloc.endTime).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' })}</td></tr>
+                                    </table>
                                 </div>
-                                <p style="font-size: 0.8rem; color: #64748b; margin-top: 15px;">
-                                    Login at the scheduled time. Your results will be available after the window closes.
+
+                                <p style="font-size: 0.85rem; color: #64748b; line-height: 1.5; margin-top: 20px;">
+                                    <b>Note:</b> Please ensure you are at the CBT center at least 15 minutes before your start time. Your login will only work within the allotted window.
                                 </p>
                             </div>
                         `
                     });
-                    console.log(`Sent to ${user.regNo}`);
-                    await delay(3000); // 3 second pause
+                    console.log(`Email dispatched for: ${user.regNo} to ${recipient}`);
+                    
+                    // ANTI-SPAM DELAY: 3.5 seconds
+                    await delay(3500); 
                 } catch (e) {
-                    console.error(`Mail failed for ${user.regNo}`);
+                    console.error(`Failed to notify ${user.regNo}:`, e.message);
                 }
             }
         }
-        // Update last notified timestamp
-        await ExamConfig.findByIdAndUpdate(examId, { lastNotifiedAt: new Date() });
     } catch (err) {
         console.error("Critical Notify Error:", err);
     }
