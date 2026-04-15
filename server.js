@@ -533,41 +533,38 @@ app.post('/api/exams/start-exam', async (req, res) => {
     }
 });
 
-// Optimized View Script: Shows ONLY questions the student answered
-app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
+// Optimized View Script: Shows ONLY questions the student answeredapp.get('/admin/view-script/:resultId/:subject', async (req, res) => {
     try {
         const { resultId, subject } = req.params;
-        
-        // 1. Find the Result
         const result = await Result.findById(resultId);
         if (!result) return res.status(404).json({ error: "Result not found" });
 
-        // 2. Find the Exam session using the ID stored in the result
-        // This is where the actual 'responses' array lives
+        // IMPORTANT: We need the Exam session for the answers
+        const Exam = require('./models/Exam'); // Ensure model is imported
         const examSession = await Exam.findById(result.examId);
-        if (!examSession) return res.status(404).json({ error: "Exam session data missing" });
+        
+        if (!examSession) {
+            return res.status(404).json({ error: "Exam session (answers) not found" });
+        }
 
-        // 3. Filter responses for this specific subject
+        // Filter responses for this subject
         const subjectResponses = examSession.responses.filter(r => r.subject === subject);
         const questionIds = subjectResponses.map(r => r.questionId);
-
-        // 4. Fetch the questions
         const questions = await Question.find({ _id: { $in: questionIds } });
 
-        // 5. Map everything together
         const script = subjectResponses.map(resp => {
             const q = questions.find(doc => doc._id.toString() === resp.questionId.toString());
             return {
-                questionText: q ? (q.questionText || q.question) : "Question not found",
+                questionText: q ? (q.questionText || q.question) : "Question Text Missing",
                 options: q ? q.options : [],
                 correctKey: q ? q.correctOptionKey : null,
                 selectedKey: resp.selectedOptionKey,
-                isCorrect: q ? (resp.selectedOptionKey === q.correctOptionKey) : false,
+                isCorrect: resp.isCorrect,
                 explanation: q ? q.explanation : ""
             };
         });
 
-        // 6. Get the stats from the result's subjectResults array
+        // Safe extraction of stats
         const subStats = result.subjectResults.find(s => s.subjectName === subject) || {};
 
         res.json({
@@ -580,10 +577,11 @@ app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
             questions: script
         });
     } catch (err) {
-        console.error("View Script Error:", err);
-        res.status(500).json({ error: err.message });
+        console.error("View Script Server Error:", err);
+        res.status(500).json({ error: "Internal Server Error" });
     }
 });
+
 
 
 // POST /api/exams/submit-exam
