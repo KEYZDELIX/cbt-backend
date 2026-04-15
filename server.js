@@ -538,35 +538,44 @@ app.post('/api/exams/start-exam', async (req, res) => {
 app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
     try {
         const { resultId, subject } = req.params;
+        
+        // 1. Get the Result document to find the userId and the config examId
         const result = await Result.findById(resultId);
         if (!result) return res.status(404).json({ error: "Result not found" });
 
-        // IMPORTANT: We need the Exam session for the answers
-        const Exam = require('./models/Exam'); // Ensure model is imported
-        const examSession = await Exam.findById(result.examId);
-        
-        if (!examSession) {
-            return res.status(404).json({ error: "Exam session (answers) not found" });
+        // 2. Locate the specific student session document in your 'exams' collection
+        // Based on your DB screenshots, we match the student and the parent exam ID
+        const session = await Exam.findOne({ 
+            userId: result.userId, 
+            examId: result.examId 
+        });
+
+        if (!session) {
+            return res.status(404).json({ error: "Student answer session not found in database." });
         }
 
-        // Filter responses for this subject
-        const subjectResponses = examSession.responses.filter(r => r.subject === subject);
-        const questionIds = subjectResponses.map(r => r.questionId);
+        // 3. Filter responses for the specific subject (e.g., "Use of English")
+        const responses = session.responses.filter(r => r.subject === subject);
+        
+        // 4. Fetch Question details from the question bank for text and options
+        const questionIds = responses.map(r => r.questionId);
         const questions = await Question.find({ _id: { $in: questionIds } });
 
-        const script = subjectResponses.map(resp => {
+        // 5. Build the script review
+        const script = responses.map(resp => {
             const q = questions.find(doc => doc._id.toString() === resp.questionId.toString());
             return {
-                questionText: q ? (q.questionText || q.question) : "Question Text Missing",
+                questionText: q ? q.questionText : "Question data missing",
                 options: q ? q.options : [],
                 correctKey: q ? q.correctOptionKey : null,
                 selectedKey: resp.selectedOptionKey,
-                isCorrect: resp.isCorrect,
+                // Check if correctKey matches student's selectedKey
+                isCorrect: q ? (resp.selectedOptionKey === q.correctOptionKey) : false,
                 explanation: q ? q.explanation : ""
             };
         });
 
-        // Safe extraction of stats
+        // 6. Get the stats from the result document's subjectResults array
         const subStats = result.subjectResults.find(s => s.subjectName === subject) || {};
 
         res.json({
@@ -579,8 +588,8 @@ app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
             questions: script
         });
     } catch (err) {
-        console.error("View Script Server Error:", err);
-        res.status(500).json({ error: "Internal Server Error" });
+        console.error("View Script Error:", err);
+        res.status(500).json({ error: "Server error retrieving review." });
     }
 });
 
