@@ -46,8 +46,8 @@ const transporter = nodemailer.createTransport({
 
 
 // FORCE IPv4: Add this block right after your transporter definition
-const dns = require('dns');
-dns.setDefaultResultOrder('ipv4first'); 
+//const dns = require('dns');
+//dns.setDefaultResultOrder('ipv4first'); 
 
 // Verification Check
 transporter.verify((error, success) => {
