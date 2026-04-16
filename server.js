@@ -1172,6 +1172,18 @@ for (const user of users) {
     }
 });
 
+
+app.get('/admin/user-history/:userId', async (req, res) => {
+    try {
+        const history = await Result.find({ userId: req.params.userId })
+            .select('examId examDate aggregateScore subjectResults')
+            .sort({ examDate: -1 });
+        res.json(history);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // Server Initialization
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
