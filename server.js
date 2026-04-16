@@ -701,7 +701,9 @@ app.post('/api/exams/submit-exam', async (req, res) => {
 });
 
 
-// 7. Admin: View All Resultsapp.get('/all-results', async (req, res) => {
+// 7. Admin: View All Results
+
+app.get('/all-results', async (req, res) => {
     try {
         const results = await Result.find()
             .populate('userId', 'firstName lastName middleName regNumber gender') // Added gender
