@@ -36,7 +36,7 @@ const QuestionSchema = new mongoose.Schema({
     type: Number, 
     default: 1, 
     min: 1, 
-    max: 2.0 
+    max: 3.0 
   },
   explanation: { type: String },
   
