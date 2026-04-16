@@ -701,19 +701,17 @@ app.post('/api/exams/submit-exam', async (req, res) => {
 });
 
 
-// 7. Admin: View All Results
-app.get('/all-results', async (req, res) => {
+// 7. Admin: View All Resultsapp.get('/all-results', async (req, res) => {
     try {
         const results = await Result.find()
-            .populate('userId', 'firstName lastName middleName regNumber') 
-            .sort({ preciseRankingScore: -1 }); // Default sort by rank
+            .populate('userId', 'firstName lastName middleName regNumber gender') // Added gender
+            .sort({ preciseRankingScore: -1 });
             
-        // Map the results to ensure fields like batchId are always present
         const cleanedResults = results.map(r => {
             const doc = r.toObject();
             return {
                 ...doc,
-                batchId: doc.batchId || 1, // Fallback to 1 if not set
+                batchId: doc.batchId || 1,
                 aggregateScore: doc.aggregateScore || 0
             };
         });
@@ -723,6 +721,7 @@ app.get('/all-results', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 // Example Express Route
 app.get('/api/topics', async (req, res) => {
