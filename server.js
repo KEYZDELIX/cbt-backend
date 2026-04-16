@@ -566,9 +566,13 @@ app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
             const q = questions.find(doc => doc._id.toString() === resp.questionId.toString());
             return {
                 questionText: q ? q.questionText : "Question data missing",
-                options: q ? q.options : [],
                 passage: q ? q.passage : "", 
-                diagram: q ? q.diagram : "",
+        questionImage: q ? q.questionImage : "", // Main question diagram
+        options: q ? q.options.map(opt => ({
+            key: opt.key,
+            value: opt.value,
+            image: opt.image // Image for specific option (A, B, C, or D)
+        })) : [],
                 correctKey: q ? q.correctOptionKey : null,
                 selectedKey: resp.selectedOptionKey,
                 // Check if correctKey matches student's selectedKey
