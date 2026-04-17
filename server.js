@@ -1184,6 +1184,78 @@ app.get('/admin/user-history/:userId', async (req, res) => {
     }
 });
 
+const FRONTEND_BASE = process.env.FRONTEND_URL || "http://127.0.0.1:8158";
+router.post('/publish', async (req, res) => {
+    const { resultIds, isTest = false } = req.body;
+    
+    try {
+        const results = await Result.find({ _id: { $in: resultIds } }).populate('studentId');
+        
+        for (let result of results) {
+            const student = result.studentId;
+            // Use your defined BASE_URL for the portal link
+            const resultLink = `${FRONTEND_BASE}/CBT-SYSTEM/frontend/result-portal.html?id=${result._id}`;
+            
+            // Build the Subject Score HTML rows
+            const subjectRows = result.subjectScores.map(s => `
+                <tr style="border-bottom: 1px solid #eee;">
+                    <td style="padding: 10px; color: #475569;">${s.subject}</td>
+                    <td style="padding: 10px; font-weight: bold; text-align: right;">${s.score}%</td>
+                </tr>
+            `).join('');
+
+            await transporter.sendMail({
+                from: '"The Math Workshop" <exams@themathworkshop.com>',
+                to: student.email,
+                subject: isTest ? `[TEST] Result Notification: ${result.examTitle}` : `Result Published: ${result.examTitle}`,
+                html: `
+                    <div style="font-family: 'Segoe UI', sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px;">
+                        <h2 style="color: #1e293b; margin-top: 0;">Hello ${student.fullName},</h2>
+                        <p style="color: #475569;">Your performance report for <b>${result.examTitle}</b> is now ready.</p>
+                        
+                        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                            <thead>
+                                <tr style="background: #f8fafc; text-align: left;">
+                                    <th style="padding: 10px; color: #6366f1;">Subject</th>
+                                    <th style="padding: 10px; color: #6366f1; text-align: right;">Score</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${subjectRows}
+                                <tr style="background: #6366f1; color: white;">
+                                    <td style="padding: 12px; font-weight: bold; border-bottom-left-radius: 8px;">AGGREGATE</td>
+                                    <td style="padding: 12px; font-weight: bold; text-align: right; border-bottom-right-radius: 8px;">${result.totalScore}%</td>
+                                </tr>
+                            </tbody>
+                        </table>
+
+                        <p style="color: #475569;">Click the button below to view your full script analysis and download your official result slip:</p>
+                        
+                        <div style="text-align: center; margin: 30px 0;">
+                            <a href="${resultLink}" style="background: #6366f1; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                                View Full Result & Script
+                            </a>
+                        </div>
+                        
+                        <p style="font-size: 0.8rem; color: #94a3b8; text-align: center;">
+                            Reg No: ${student.regNo} | Date: ${new Date().toLocaleDateString()}
+                        </p>
+                    </div>
+                `
+            });
+
+            if (!isTest) {
+                result.isPublished = true;
+                await result.save();
+            }
+        }
+        res.json({ success: true, message: isTest ? "Test email sent!" : "Results published and emails sent!" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
 // Server Initialization
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
