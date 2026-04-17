@@ -727,70 +727,74 @@ app.get('/all-results', async (req, res) => {
 
 
 // GET ONE SPECIFIC RESULT (For PDF and Result Portal)
-
 app.get('/results/:id', async (req, res) => {
     try {
         const result = await Result.findById(req.params.id)
-            .populate({
-                path: 'userId',
-                select: 'firstName lastName middleName regNumber regNo' // Try both
-            });
+            .populate('userId', 'firstName lastName middleName regNumber regNo');
 
         if (!result) return res.status(404).json({ error: "Result not found" });
 
-        const examSession = await Exam.findById(result.examId).populate('examId'); 
+        const examSession = await Exam.findById(result.examId).lean(); 
 
-        const responseData = {
-            // DATA FIX 1: Name handling
-            studentName: `${result.userId?.firstName || ''} ${result.userId?.middleName || ''} ${result.userId?.lastName || ''}`.trim() || "Unknown Student",
-            
-            // DATA FIX 2: Registration Number (Checking all possible fields)
-            regNo: result.userId?.regNumber || result.userId?.regNo || result.userId?.regNumber || "N/A", 
-            
-            examTitle: examSession?.examId?.title || "Examination Report", 
-            examDate: result.examDate || new Date(),
-            aggregateScore: result.aggregateScore || 0,
-            totalTimeTaken: result.timeTaken || 0,
-            
-            // DATA FIX 3: Subject Time (Checking for case sensitivity and spaces)
-            subjectScores: (result.subjectResults || []).map(s => {
-                const timeData = examSession?.subjectAnalysis?.find(a => 
-                    a.subjectName.replace(/\s/g, '').toLowerCase() === s.subjectName.replace(/\s/g, '').toLowerCase()
-                );
-                return {
-                    name: s.subjectName,
-                    correct: s.correctCount,
-                    total: s.totalQuestions,
-                    score: s.normalizedScore2,
-                    timeSpent: timeData ? timeData.secondsSpent : 0 
-                };
-            }),
-            
-            // DATA FIX 4: Script Responses
-            detailedAnswers: examSession?.responses || []
+        // Helper to ensure images have full URLs
+        const getFullUrl = (path) => {
+            if (!path) return null;
+            if (path.startsWith('http')) return path;
+            return `${process.env.BASE_URL || 'http://localhost:5000'}/${path.replace(/^\//, '')}`;
         };
 
-        // If we have responses but need question text, we fetch them here
-        const scriptWithText = [];
-        for (let resp of responseData.detailedAnswers) {
-            const q = await mongoose.model('Question').findById(resp.questionId).lean();
-            if (q) {
-                scriptWithText.push({
-                    subject: resp.subject,
-                    questionText: q.questionText,
-                    userChoice: resp.selectedOptionKey || "Skipped",
-                    correctKey: q.correctOptionKey,
-                    isCorrect: String(resp.selectedOptionKey) === String(q.correctOptionKey)
-                });
+        const subjectScores = (result.subjectResults || []).map(s => {
+            const timeData = examSession?.subjectAnalysis?.find(a => 
+                a.subjectName.trim().toLowerCase() === s.subjectName.trim().toLowerCase()
+            );
+            return {
+                name: s.subjectName.toUpperCase(),
+                correct: s.correctCount,
+                total: s.totalQuestions,
+                score: s.normalizedScore2,
+                timeSpent: timeData ? timeData.secondsSpent : 0 
+            };
+        });
+
+        const detailedAnswers = [];
+        if (examSession && examSession.responses) {
+            for (const resp of examSession.responses) {
+                const q = await mongoose.model('Question').findById(resp.questionId).lean();
+                if (q) {
+                    detailedAnswers.push({
+                        subject: resp.subject.toUpperCase(),
+                        questionText: q.questionText,
+                        questionImage: getFullUrl(q.questionImage),
+                        userChoice: resp.selectedOptionKey || "Skipped",
+                        correctKey: q.correctOptionKey,
+                        isCorrect: String(resp.selectedOptionKey) === String(q.correctOptionKey),
+                        // Pass options along with their images
+                        options: (q.options || []).map(opt => ({
+                            ...opt,
+                            optionImage: getFullUrl(opt.optionImage)
+                        }))
+                    });
+                }
             }
         }
-        responseData.detailedAnswers = scriptWithText;
 
-        res.json(responseData);
+        res.json({
+            studentName: `${result.userId?.firstName || ''} ${result.userId?.middleName || ''} ${result.userId?.lastName || ''}`.trim().toUpperCase(),
+            regNo: result.userId?.regNumber || result.userId?.regNo || result.userId?.regNumber || "N/A", 
+            
+            examTitle: examSession?.examId?.title || "SST JAMB Mock Report", 
+            // Include full timestamp
+            examDate: result.examDate, 
+            aggregateScore: result.aggregateScore,
+            totalTimeTaken: result.timeTaken,
+            subjectScores,
+            detailedAnswers
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 
 // Example Express Route
