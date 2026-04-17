@@ -1,31 +1,28 @@
 const mongoose = require('mongoose');
 
 const ResultSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  examId: { type: mongoose.Schema.Types.ObjectId, ref: 'Exam', required: true },
-  
-  subjectResults: [{
-    subjectName: String,
-    correctCount: { type: Number, default: 0 },
-    totalQuestions: { type: Number, default: 40 },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    examId: { type: mongoose.Schema.Types.ObjectId, ref: 'ExamConfig' }, 
+    examSessionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Exam' },
     
-    // Raw Scoring
-    rawScore1: Number,      // (correct/total) * 100
-    rawScore2: Number,      // round(rawScore1)
-    
-    // Weighted Scoring (Used for Normalization)
-    weightedScore1: Number, // The x in your formula
-    weightedScore2: Number, // round(weightedScore1)
-    
-    // JAMB Normalization
-    normalizedScore1: Number, // [S1(x - x')/ S2] + x'1
-    normalizedScore2: Number  // round(normalizedScore1)
-  }],
+    // Define the internal fields here
+    subjectResults: [{
+        subjectName: String,
+        correctCount: Number,
+        totalQuestions: Number,
+        rawScore1: Number,      // Decimal Raw
+        rawScore2: Number,      // Rounded Raw
+        weightedScore1: Number,  // Decimal Weighted
+        weightedScore2: Number,  // Rounded Weighted
+        normalizedScore1: Number, // Decimal Curved
+        normalizedScore2: Number  // Rounded Curved
+    }],
 
-  aggregateScore: { type: Number, default: 0 }, // Sum of normalizedScore2
-  preciseRankingScore: { type: Number },        // Sum of normalizedScore1 (to 3 decimals)
-  timeTaken: { type: Number }, 
-  examDate: { type: Date, default: Date.now }
+    aggregateScore: Number,       // Sum of normalizedScore2
+    preciseRankingScore: Number,  // Sum of normalizedScore1 (for tie-breaking)
+    totalWeightedScore: Number,   // Keep for backward compatibility
+    timeTaken: Number,
+    examDate: { type: Date, default: Date.now }
 });
 
 module.exports = mongoose.model('Result', ResultSchema);
