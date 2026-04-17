@@ -1,6 +1,7 @@
 // ================= BACKEND: server.js =================
 require('dotenv').config();
 const express = require('express');
+const router = express.Router();
 const mongoose = require('mongoose');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
@@ -1255,7 +1256,7 @@ router.post('/publish', async (req, res) => {
     }
 });
 
-
+module.exports = router;
 // Server Initialization
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
