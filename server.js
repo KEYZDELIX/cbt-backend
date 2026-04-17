@@ -524,7 +524,7 @@ app.post('/api/exams/start-exam', async (req, res) => {
                 status: 'active',
                 startTime: new Date()
             });
-            await exam.save();
+            await exam.();
         }
 
         res.json({ examId: exam._id });
@@ -678,10 +678,18 @@ app.post('/api/exams/submit-exam', async (req, res) => {
             const totalWeighted = subjectResults.reduce((acc, s) => acc + s.weightedScore2, 0);
 
             const finalResult = await Result.findOneAndUpdate(
-                { userId, examId: updatedExam.examId }, 
-                { userId, examId: updatedExam.examId, subjectResults, totalRawScore: totalRaw, totalWeightedScore: totalWeighted, timeTaken: 7200 - totalSecondsRemaining },
-                { upsert: true, new: true }
-            );
+    { userId, examId: updatedExam._id }, // CHANGED: Use updatedExam._id (The Session)
+    { 
+        userId, 
+        examId: updatedExam._id, // CHANGED: Use updatedExam._id
+        subjectResults, 
+        totalRawScore: totalRaw, 
+        totalWeightedScore: totalWeighted, 
+        // Correctly capture time taken
+        timeTaken: 7200 - totalSecondsRemaining 
+    },
+    { upsert: true, new: true }
+);
 
             await User.updateOne(
                 { _id: userId, "examAllocations.examId": updatedExam.examId },
@@ -731,11 +739,11 @@ app.get('/all-results', async (req, res) => {
 app.get('/results/:id', async (req, res) => {
     try {
         const result = await Result.findById(req.params.id)
-            .populate('userId', 'firstName lastName middleName regNumber regNo');
+            .populate('userId', 'firstName lastName middleName regNumber regNo gender');
 
         if (!result) return res.status(404).json({ error: "Result not found" });
 
-        // Fetch the Exam document using the ID stored in the Result
+        // This now correctly finds the Session because we linked it via _id above
         const examSession = await Exam.findById(result.examId).lean(); 
 
         const getFullUrl = (path) => {
@@ -744,25 +752,24 @@ app.get('/results/:id', async (req, res) => {
             return `${process.env.BASE_URL || 'http://localhost:5000'}/${path.replace(/^\//, '')}`;
         };
 
-        // --- FIX: IMPROVED TIME MAPPING ---
+        // Mapping Time and Scores
         const subjectScores = (result.subjectResults || []).map(s => {
+            // MATCHING LOGIC: Finds time spent even if names have different casing
             const timeData = examSession?.subjectAnalysis?.find(a => 
-                // Matches "Physics" to "PHYSICS" or " PHYSICS "
-                new RegExp(`^${s.subjectName.trim()}$`, 'i').test(a.subjectName.trim())
+                a.subjectName.trim().toLowerCase() === s.subjectName.trim().toLowerCase()
             );
             return {
                 name: s.subjectName.toUpperCase(),
                 correct: s.correctCount,
                 total: s.totalQuestions,
-                score: s.normalizedScore2,
+                score: s.normalizedScore2 || s.weightedScore2 || 0,
                 timeSpent: timeData ? timeData.secondsSpent : 0 
             };
         });
 
-        // --- FIX: SCRIPT FETCHING ---
+        // Mapping Question Scripts
         const detailedAnswers = [];
-        if (examSession && examSession.responses && examSession.responses.length > 0) {
-            // Use Promise.all to fetch all questions at once for speed
+        if (examSession && examSession.responses) {
             const questionIds = examSession.responses.map(r => r.questionId);
             const questions = await mongoose.model('Question').find({ _id: { $in: questionIds } }).lean();
 
@@ -773,7 +780,7 @@ app.get('/results/:id', async (req, res) => {
                         subject: resp.subject.toUpperCase(),
                         questionText: q.questionText,
                         questionImage: getFullUrl(q.questionImage),
-                        userChoice: resp.selectedOptionKey || "---",
+                        userChoice: resp.selectedOptionKey || "Skipped",
                         correctKey: q.correctOptionKey,
                         isCorrect: String(resp.selectedOptionKey).trim() === String(q.correctOptionKey).trim(),
                         options: (q.options || []).map(opt => ({
@@ -788,16 +795,17 @@ app.get('/results/:id', async (req, res) => {
 
         res.json({
             studentName: `${result.userId?.firstName || ''} ${result.userId?.middleName || ''} ${result.userId?.lastName || ''}`.trim().toUpperCase(),
-            regNo: result.userId?.regNumber || result.userId?.regNo || result.userId?.regNumber || "N/A", 
-            
-            examTitle: examSession?.examId?.title || "SST JAMB Mock Report", 
+            regNo: result.userId?.regNumber || result.userId?.regNo || "N/A",
+            gender: result.userId?.gender || "N/A",
+            examTitle: "JAMB STANDARD CBT PERFORMANCE REPORT",
             examDate: result.examDate,
-            aggregateScore: result.aggregateScore,
+            aggregateScore: result.aggregateScore || result.totalWeightedScore || 0,
             totalTimeTaken: result.timeTaken,
             subjectScores,
             detailedAnswers
         });
     } catch (err) {
+        console.error("PDF Data Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
