@@ -731,14 +731,15 @@ app.get('/all-results', async (req, res) => {
 app.get('/results/:id', async (req, res) => {
     try {
         const result = await Result.findById(req.params.id)
-            .populate('userId', 'firstName lastName middleName regNumber gender'); // Added middleName
+            .populate('userId', 'firstName lastName middleName regNumber gender');
 
         if (!result) return res.status(404).json({ error: "Result not found" });
 
+        // Populate examId to get the title and the raw responses
         const examSession = await Exam.findById(result.examId).populate('examId'); 
 
         const detailedAnswers = [];
-        if (examSession && examSession.responses.length > 0) {
+        if (examSession && examSession.responses && examSession.responses.length > 0) {
             for (const resp of examSession.responses) {
                 const question = await mongoose.model('Question').findById(resp.questionId);
                 if (question) {
@@ -748,7 +749,7 @@ app.get('/results/:id', async (req, res) => {
                         questionImage: question.questionImage,
                         userChoice: resp.selectedOptionKey || "Skipped",
                         correctKey: question.correctOptionKey,
-                        isCorrect: String(resp.selectedOptionKey) === String(question.correctOptionKey),
+                        isCorrect: String(resp.selectedOptionKey).trim() === String(question.correctOptionKey).trim(),
                         options: question.options 
                     });
                 }
@@ -756,25 +757,26 @@ app.get('/results/:id', async (req, res) => {
         }
 
         const responseData = {
-            // FIX: Combine all three names
-            studentName: `${result.userId.firstName} ${result.userId.middleName || ''} ${result.userId.lastName}`.replace(/\s+/g, ' '),
-            regNo: result.userId.regNumber, // Check if your model uses regNumber or regNo
-            gender: result.userId.gender,
-            examTitle: examSession?.examId?.title || "Standard CBT Examination", 
+            studentName: `${result.userId?.firstName || ''} ${result.userId?.middleName || ''} ${result.userId?.lastName || ''}`.trim().toUpperCase(),
+            // FIX: Checking both possible field names for Reg Number
+            regNo: result.userId?.regNumber || result.userId?.regNo || "N/A", 
+            gender: result.userId?.gender || "N/A",
+            examTitle: examSession?.examId?.title || "JAMB STANDARD CBT MOCK", 
             examDate: result.examDate,
             aggregateScore: result.aggregateScore,
             totalTimeTaken: result.timeTaken,
-            // FIX: Ensure we map subjectAnalysis seconds properly
+            
             subjectScores: result.subjectResults.map(s => {
+                // FIX: Match subject names carefully (case-insensitive)
                 const timeData = examSession?.subjectAnalysis?.find(a => 
-                    a.subjectName.toLowerCase() === s.subjectName.toLowerCase()
+                    a.subjectName.trim().toLowerCase() === s.subjectName.trim().toLowerCase()
                 );
                 return {
                     name: s.subjectName,
                     correct: s.correctCount,
                     total: s.totalQuestions,
                     score: s.normalizedScore2,
-                    // Use secondsSpent if available, otherwise fallback to 0
+                    // Use secondsSpent from your schema
                     timeSpent: timeData ? timeData.secondsSpent : 0 
                 };
             }),
@@ -783,6 +785,7 @@ app.get('/results/:id', async (req, res) => {
 
         res.json(responseData);
     } catch (err) {
+        console.error("PDF Data Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
