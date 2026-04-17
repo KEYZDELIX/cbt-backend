@@ -726,26 +726,27 @@ app.get('/all-results', async (req, res) => {
 });
 
 
-// GET ONE SPECIFIC RESULT (For PDF and Result Portal)
-app.get('/results/:id', async (req, res) => {
+// GET ONE SPECIFIC RESULT (For PDF and Result Portal)app.get('/results/:id', async (req, res) => {
     try {
         const result = await Result.findById(req.params.id)
             .populate('userId', 'firstName lastName middleName regNumber regNo');
 
         if (!result) return res.status(404).json({ error: "Result not found" });
 
+        // Fetch the Exam document using the ID stored in the Result
         const examSession = await Exam.findById(result.examId).lean(); 
 
-        // Helper to ensure images have full URLs
         const getFullUrl = (path) => {
             if (!path) return null;
             if (path.startsWith('http')) return path;
             return `${process.env.BASE_URL || 'http://localhost:5000'}/${path.replace(/^\//, '')}`;
         };
 
+        // --- FIX: IMPROVED TIME MAPPING ---
         const subjectScores = (result.subjectResults || []).map(s => {
             const timeData = examSession?.subjectAnalysis?.find(a => 
-                a.subjectName.trim().toLowerCase() === s.subjectName.trim().toLowerCase()
+                // Matches "Physics" to "PHYSICS" or " PHYSICS "
+                new RegExp(`^${s.subjectName.trim()}$`, 'i').test(a.subjectName.trim())
             );
             return {
                 name: s.subjectName.toUpperCase(),
@@ -756,26 +757,31 @@ app.get('/results/:id', async (req, res) => {
             };
         });
 
+        // --- FIX: SCRIPT FETCHING ---
         const detailedAnswers = [];
-        if (examSession && examSession.responses) {
-            for (const resp of examSession.responses) {
-                const q = await mongoose.model('Question').findById(resp.questionId).lean();
+        if (examSession && examSession.responses && examSession.responses.length > 0) {
+            // Use Promise.all to fetch all questions at once for speed
+            const questionIds = examSession.responses.map(r => r.questionId);
+            const questions = await mongoose.model('Question').find({ _id: { $in: questionIds } }).lean();
+
+            examSession.responses.forEach(resp => {
+                const q = questions.find(item => item._id.toString() === resp.questionId.toString());
                 if (q) {
                     detailedAnswers.push({
                         subject: resp.subject.toUpperCase(),
                         questionText: q.questionText,
                         questionImage: getFullUrl(q.questionImage),
-                        userChoice: resp.selectedOptionKey || "Skipped",
+                        userChoice: resp.selectedOptionKey || "---",
                         correctKey: q.correctOptionKey,
-                        isCorrect: String(resp.selectedOptionKey) === String(q.correctOptionKey),
-                        // Pass options along with their images
+                        isCorrect: String(resp.selectedOptionKey).trim() === String(q.correctOptionKey).trim(),
                         options: (q.options || []).map(opt => ({
-                            ...opt,
+                            key: opt.key,
+                            value: opt.value,
                             optionImage: getFullUrl(opt.optionImage)
                         }))
                     });
                 }
-            }
+            });
         }
 
         res.json({
@@ -783,8 +789,7 @@ app.get('/results/:id', async (req, res) => {
             regNo: result.userId?.regNumber || result.userId?.regNo || result.userId?.regNumber || "N/A", 
             
             examTitle: examSession?.examId?.title || "SST JAMB Mock Report", 
-            // Include full timestamp
-            examDate: result.examDate, 
+            examDate: result.examDate,
             aggregateScore: result.aggregateScore,
             totalTimeTaken: result.timeTaken,
             subjectScores,
@@ -794,6 +799,7 @@ app.get('/results/:id', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 
 
