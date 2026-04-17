@@ -727,24 +727,15 @@ app.get('/all-results', async (req, res) => {
 
 
 // GET ONE SPECIFIC RESULT (For PDF and Result Portal)
+
 app.get('/results/:id', async (req, res) => {
     try {
         const result = await Result.findById(req.params.id)
-            .populate('userId', 'firstName lastName middleName regNumber gender');
+            .populate('userId', 'firstName lastName middleName regNumber gender'); // Added middleName
 
         if (!result) return res.status(404).json({ error: "Result not found" });
 
-        // Populate examId to get the title from ExamConfig
-        const examSession = await Exam.findById(result.examId)
-            .populate('examId'); 
-
-        // Helper to ensure images have full URLs for the PDF generator
-        const getFullUrl = (path) => {
-            if (!path) return null;
-            if (path.startsWith('http')) return path;
-            // Uses your backend BASE_URL (e.g., http://localhost:5000)
-            return `${process.env.BASE_URL || 'http://localhost:5000'}/${path.replace(/^\//, '')}`;
-        };
+        const examSession = await Exam.findById(result.examId).populate('examId'); 
 
         const detailedAnswers = [];
         if (examSession && examSession.responses.length > 0) {
@@ -754,36 +745,37 @@ app.get('/results/:id', async (req, res) => {
                     detailedAnswers.push({
                         subject: resp.subject,
                         questionText: question.questionText,
-                        questionImage: getFullUrl(question.questionImage),
+                        questionImage: question.questionImage,
                         userChoice: resp.selectedOptionKey || "Skipped",
                         correctKey: question.correctOptionKey,
-                        isCorrect: resp.selectedOptionKey === question.correctOptionKey,
-                        options: (question.options || []).map(opt => ({
-                            ...opt.toObject(),
-                            optionImage: getFullUrl(opt.optionImage)
-                        }))
+                        isCorrect: String(resp.selectedOptionKey) === String(question.correctOptionKey),
+                        options: question.options 
                     });
                 }
             }
         }
 
         const responseData = {
-            studentName: `${result.userId.firstName} ${result.userId.lastName}`,
-            regNo: result.userId.regNumber,
+            // FIX: Combine all three names
+            studentName: `${result.userId.firstName} ${result.userId.middleName || ''} ${result.userId.lastName}`.replace(/\s+/g, ' '),
+            regNo: result.userId.regNumber, // Check if your model uses regNumber or regNo
             gender: result.userId.gender,
-            // UPDATED: Pulling 'title' from ExamConfig
             examTitle: examSession?.examId?.title || "Standard CBT Examination", 
             examDate: result.examDate,
             aggregateScore: result.aggregateScore,
             totalTimeTaken: result.timeTaken,
+            // FIX: Ensure we map subjectAnalysis seconds properly
             subjectScores: result.subjectResults.map(s => {
-                const timeData = examSession ? examSession.subjectAnalysis.find(a => a.subjectName === s.subjectName) : null;
+                const timeData = examSession?.subjectAnalysis?.find(a => 
+                    a.subjectName.toLowerCase() === s.subjectName.toLowerCase()
+                );
                 return {
                     name: s.subjectName,
                     correct: s.correctCount,
                     total: s.totalQuestions,
                     score: s.normalizedScore2,
-                    timeSpent: timeData ? timeData.secondsSpent : 0
+                    // Use secondsSpent if available, otherwise fallback to 0
+                    timeSpent: timeData ? timeData.secondsSpent : 0 
                 };
             }),
             detailedAnswers: detailedAnswers
@@ -791,7 +783,6 @@ app.get('/results/:id', async (req, res) => {
 
         res.json(responseData);
     } catch (err) {
-        console.error("Backend Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
