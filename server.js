@@ -726,7 +726,9 @@ app.get('/all-results', async (req, res) => {
 });
 
 
-// GET ONE SPECIFIC RESULT (For PDF and Result Portal)app.get('/results/:id', async (req, res) => {
+// GET ONE SPECIFIC RESULT (For PDF and Result Portal)
+
+app.get('/results/:id', async (req, res) => {
     try {
         const result = await Result.findById(req.params.id)
             .populate('userId', 'firstName lastName middleName regNumber regNo');
