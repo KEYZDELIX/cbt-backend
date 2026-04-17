@@ -387,7 +387,7 @@ async function getEnglishPaper(examConfigId) {
                 }
             } else {
                 // For Lexis, Structure, Oral: 
-                // We fetch the requested quantity and then SHUFFLE them.
+                // We  the requested quantity and then SHUFFLE them.
                 const qs = await Question.aggregate([
                     { $match: { 
                         subject: "Use of English", 
@@ -722,6 +722,36 @@ app.get('/all-results', async (req, res) => {
         res.json(cleanedResults);
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+
+// GET ONE SPECIFIC RESULT (For PDF and Result Portal)
+app.get('/results/:id', async (req, res) => {
+    try {
+        // Find the specific result by its ID and pull student info
+        const result = await Result.findById(req.params.id)
+            .populate('userId', 'firstName lastName middleName regNumber');
+
+        if (!result) {
+            return res.status(404).json({ error: "Result not found" });
+        }
+
+        // Map the data to match exactly what your PDF function expects
+        const responseData = {
+            studentName: `${result.userId.firstName} ${result.userId.lastName}`,
+            regNo: result.userId.regNumber,
+            examTitle: result.examTitle || "CBT Examination",
+            totalScore: result.aggregateScore || result.totalScore, // Adjust to your field name
+            totalTimeSpent: result.totalTimeSpent,
+            subjectScores: result.subjectScores, // Array of subject performance
+            detailedAnswers: result.detailedAnswers // The "Script" (questions/answers)
+        };
+
+        res.json(responseData);
+    } catch (err) {
+        console.error("Error fetching single result:", err);
+        res.status(500).json({ error: "Server error fetching result" });
     }
 });
 
