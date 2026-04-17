@@ -731,61 +731,63 @@ app.get('/all-results', async (req, res) => {
 app.get('/results/:id', async (req, res) => {
     try {
         const result = await Result.findById(req.params.id)
-            .populate('userId', 'firstName lastName middleName regNumber gender');
+            .populate({
+                path: 'userId',
+                select: 'firstName lastName middleName regNumber regNo' // Try both
+            });
 
         if (!result) return res.status(404).json({ error: "Result not found" });
 
-        // Populate examId to get the title and the raw responses
         const examSession = await Exam.findById(result.examId).populate('examId'); 
 
-        const detailedAnswers = [];
-        if (examSession && examSession.responses && examSession.responses.length > 0) {
-            for (const resp of examSession.responses) {
-                const question = await mongoose.model('Question').findById(resp.questionId);
-                if (question) {
-                    detailedAnswers.push({
-                        subject: resp.subject,
-                        questionText: question.questionText,
-                        questionImage: question.questionImage,
-                        userChoice: resp.selectedOptionKey || "Skipped",
-                        correctKey: question.correctOptionKey,
-                        isCorrect: String(resp.selectedOptionKey).trim() === String(question.correctOptionKey).trim(),
-                        options: question.options 
-                    });
-                }
-            }
-        }
-
         const responseData = {
-            studentName: `${result.userId?.firstName || ''} ${result.userId?.middleName || ''} ${result.userId?.lastName || ''}`.trim().toUpperCase(),
-            // FIX: Checking both possible field names for Reg Number
-            regNo: result.userId?.regNumber || result.userId?.regNo || "N/A", 
-            gender: result.userId?.gender || "N/A",
-            examTitle: examSession?.examId?.title || "JAMB STANDARD CBT MOCK", 
-            examDate: result.examDate,
-            aggregateScore: result.aggregateScore,
-            totalTimeTaken: result.timeTaken,
+            // DATA FIX 1: Name handling
+            studentName: `${result.userId?.firstName || ''} ${result.userId?.middleName || ''} ${result.userId?.lastName || ''}`.trim() || "Unknown Student",
             
-            subjectScores: result.subjectResults.map(s => {
-                // FIX: Match subject names carefully (case-insensitive)
+            // DATA FIX 2: Registration Number (Checking all possible fields)
+            regNo: result.userId?.regNumber || result.userId?.regNo || result.userId?.regNumber || "N/A", 
+            
+            examTitle: examSession?.examId?.title || "Examination Report", 
+            examDate: result.examDate || new Date(),
+            aggregateScore: result.aggregateScore || 0,
+            totalTimeTaken: result.timeTaken || 0,
+            
+            // DATA FIX 3: Subject Time (Checking for case sensitivity and spaces)
+            subjectScores: (result.subjectResults || []).map(s => {
                 const timeData = examSession?.subjectAnalysis?.find(a => 
-                    a.subjectName.trim().toLowerCase() === s.subjectName.trim().toLowerCase()
+                    a.subjectName.replace(/\s/g, '').toLowerCase() === s.subjectName.replace(/\s/g, '').toLowerCase()
                 );
                 return {
                     name: s.subjectName,
                     correct: s.correctCount,
                     total: s.totalQuestions,
                     score: s.normalizedScore2,
-                    // Use secondsSpent from your schema
                     timeSpent: timeData ? timeData.secondsSpent : 0 
                 };
             }),
-            detailedAnswers: detailedAnswers
+            
+            // DATA FIX 4: Script Responses
+            detailedAnswers: examSession?.responses || []
         };
+
+        // If we have responses but need question text, we fetch them here
+        const scriptWithText = [];
+        for (let resp of responseData.detailedAnswers) {
+            const q = await mongoose.model('Question').findById(resp.questionId).lean();
+            if (q) {
+                scriptWithText.push({
+                    subject: resp.subject,
+                    questionText: q.questionText,
+                    userChoice: resp.selectedOptionKey || "Skipped",
+                    correctKey: q.correctOptionKey,
+                    isCorrect: String(resp.selectedOptionKey) === String(q.correctOptionKey)
+                });
+            }
+        }
+        responseData.detailedAnswers = scriptWithText;
 
         res.json(responseData);
     } catch (err) {
-        console.error("PDF Data Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
