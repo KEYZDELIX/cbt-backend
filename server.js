@@ -608,107 +608,73 @@ app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
 
 // POST /api/exams/submit-exam
 
-// POST: Submit Exam
 app.post('/api/exams/submit-exam', async (req, res) => {
     try {
         const { userId, examId, responses, subjectAnalysis, totalSecondsRemaining, status } = req.body;
 
         const updatedExam = await Exam.findOneAndUpdate(
             { _id: examId, userId },
-            { $set: { responses, subjectAnalysis, totalSecondsRemaining, status, 
-              endTime: (status === 'submitted' || status === 'timed-out') ? new Date() : null } },
+            { $set: { responses, subjectAnalysis, totalSecondsRemaining, status, endTime: new Date() } },
             { new: true }
         );
 
-        // --- ERROR FIX: Added the missing IF block and defined userSubjects ---
         if (status === 'submitted' || status === 'timed-out') {
             const subjectResults = [];
-            const userSubjects = updatedExam.subjectCombination || []; // Pull from DB
+            const userSubjects = updatedExam.subjectCombination || [];
 
             for (const subName of userSubjects) {
-                // 1. Determine expected total count
                 const isEnglish = subName.toLowerCase().includes('english');
                 const expectedTotal = isEnglish ? 60 : 40;
 
-                // 2. Calculate the 'Perfect Score' denominator
-                const dbQuestions = await Question.find({ subject: subName });
-                const countInDb = dbQuestions.length;
-                const weightInDb = dbQuestions.reduce((acc, q) => acc + (q.weight || 1), 0);
+                const poolQuestions = await Question.find({ subject: subName });
+                const actualCount = poolQuestions.length;
+                const existingWeightSum = poolQuestions.reduce((acc, q) => acc + (q.weight || 1), 0);
+                
+                // Logic: Add 1.0 for every missing question to hit the JAMB target
+                const totalPossibleWeight = actualCount < expectedTotal 
+                    ? existingWeightSum + (expectedTotal - actualCount) 
+                    : existingWeightSum;
 
-                let totalPossibleWeight;
-                if (countInDb < expectedTotal) {
-                    const missingCount = expectedTotal - countInDb;
-                    totalPossibleWeight = weightInDb + (missingCount * 1.0);
-                } else {
-                    totalPossibleWeight = weightInDb;
-                }
-
-                // 3. Mark User Responses
                 const subResponses = responses.filter(r => r.subject === subName);
-                let correctCount = 0;
                 let earnedWeight = 0;
+                let correctCount = 0;
 
                 for (const resp of subResponses) {
-                    const q = await Question.findById(resp.questionId);
+                    const q = poolQuestions.find(item => item._id.toString() === resp.questionId.toString());
                     if (q && q.correctOptionKey) {
-                        const dbAns = q.correctOptionKey.trim().toUpperCase();
-                        const userAns = resp.selectedOptionKey.trim().toUpperCase();
-
-                        if (dbAns === userAns) {
+                        if (q.correctOptionKey.trim().toUpperCase() === resp.selectedOptionKey.trim().toUpperCase()) {
                             correctCount++;
                             earnedWeight += (q.weight || 1);
                         }
                     }
                 }
 
-                // 4. Calculate final percentages
-                const wScore1 = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
-                const rScore1 = (correctCount / expectedTotal) * 100;
+                const finalSubjectScore = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
 
                 subjectResults.push({
                     subjectName: subName,
                     correctCount,
                     totalQuestions: expectedTotal,
-                    rawScore1: rScore1,
-                    rawScore2: Math.round(rScore1),
-                    weightedScore1: wScore1, 
-                    weightedScore2: Math.round(wScore1),
-                    normalizedScore1: 0, 
-                    normalizedScore2: 0
+                    weightedScore2: Math.round(finalSubjectScore),
+                    normalizedScore2: Math.round(finalSubjectScore)
                 });
-            } // End of for loop
+            }
 
-            const totalRaw = subjectResults.reduce((acc, s) => acc + s.rawScore2, 0);
             const totalWeighted = subjectResults.reduce((acc, s) => acc + s.weightedScore2, 0);
 
             const finalResult = await Result.findOneAndUpdate(
-    { userId, examId: updatedExam._id }, // CHANGED: Use updatedExam._id (The Session)
-    { 
-        userId, 
-        examId: updatedExam._id, // CHANGED: Use updatedExam._id
-        subjectResults, 
-        totalRawScore: totalRaw, 
-        totalWeightedScore: totalWeighted, 
-        // Correctly capture time taken
-        timeTaken: 7200 - totalSecondsRemaining 
-    },
-    { upsert: true, new: true }
-);
-
-            await User.updateOne(
-                { _id: userId, "examAllocations.examId": updatedExam.examId },
-                { $set: { "examAllocations.$.hasTaken": true } }
+                { userId, examId: updatedExam._id },
+                { 
+                    userId, examId: updatedExam._id, subjectResults, 
+                    aggregateScore: totalWeighted, 
+                    timeTaken: 7200 - totalSecondsRemaining 
+                },
+                { upsert: true, new: true }
             );
 
-            await runNormalization(Result, updatedExam.examId);
-            const refreshed = await Result.findById(finalResult._id);
-
-            return res.json({ success: true, status: "finished", data: refreshed });
-        } // End of status check block
-
-        res.json({ success: true, status: "active" });
+            return res.json({ success: true, data: finalResult });
+        }
     } catch (err) {
-        console.error("Submit Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -742,38 +708,16 @@ app.get('/all-results', async (req, res) => {
 
 app.get('/results/:id', async (req, res) => {
     try {
-        const result = await Result.findById(req.params.id)
-            .populate('userId', 'firstName lastName middleName regNumber regNo gender');
-
-        if (!result) return res.status(404).json({ error: "Result not found" });
-
-        // This now correctly finds the Session because we linked it via _id above
+        const result = await Result.findById(req.params.id).populate('userId', 'firstName lastName middleName regNumber regNo');
         const examSession = await Exam.findById(result.examId).lean(); 
 
         const getFullUrl = (path) => {
-            if (!path) return null;
-            if (path.startsWith('http')) return path;
+            if (!path || path.startsWith('http')) return path;
             return `${process.env.BASE_URL || 'http://localhost:5000'}/${path.replace(/^\//, '')}`;
         };
 
-        // Mapping Time and Scores
-        const subjectScores = (result.subjectResults || []).map(s => {
-            // MATCHING LOGIC: Finds time spent even if names have different casing
-            const timeData = examSession?.subjectAnalysis?.find(a => 
-                a.subjectName.trim().toLowerCase() === s.subjectName.trim().toLowerCase()
-            );
-            return {
-                name: s.subjectName.toUpperCase(),
-                correct: s.correctCount,
-                total: s.totalQuestions,
-                score: s.normalizedScore2 || s.weightedScore2 || 0,
-                timeSpent: timeData ? timeData.secondsSpent : 0 
-            };
-        });
-
-        // Mapping Question Scripts
         const detailedAnswers = [];
-        if (examSession && examSession.responses) {
+        if (examSession?.responses) {
             const questionIds = examSession.responses.map(r => r.questionId);
             const questions = await mongoose.model('Question').find({ _id: { $in: questionIds } }).lean();
 
@@ -782,15 +726,14 @@ app.get('/results/:id', async (req, res) => {
                 if (q) {
                     detailedAnswers.push({
                         subject: resp.subject.toUpperCase(),
+                        passage: q.passage || null, // Capture the passage
                         questionText: q.questionText,
                         questionImage: getFullUrl(q.questionImage),
                         userChoice: resp.selectedOptionKey || "Skipped",
                         correctKey: q.correctOptionKey,
                         isCorrect: String(resp.selectedOptionKey).trim() === String(q.correctOptionKey).trim(),
                         options: (q.options || []).map(opt => ({
-                            key: opt.key,
-                            value: opt.value,
-                            optionImage: getFullUrl(opt.optionImage)
+                            key: opt.key, value: opt.value, optionImage: getFullUrl(opt.optionImage)
                         }))
                     });
                 }
@@ -798,22 +741,22 @@ app.get('/results/:id', async (req, res) => {
         }
 
         res.json({
-            studentName: `${result.userId?.firstName || ''} ${result.userId?.middleName || ''} ${result.userId?.lastName || ''}`.trim().toUpperCase(),
+            studentName: `${result.userId?.firstName || ''} ${result.userId?.lastName || ''}`.toUpperCase(),
             regNo: result.userId?.regNumber || result.userId?.regNo || "N/A",
-            gender: result.userId?.gender || "N/A",
-            examTitle: "JAMB STANDARD CBT PERFORMANCE REPORT",
+            examTitle: "JAMB STANDARD PERFORMANCE TRANSCRIPT",
             examDate: result.examDate,
-            aggregateScore: result.aggregateScore || result.totalWeightedScore || 0,
-            totalTimeTaken: result.timeTaken,
-            subjectScores,
+            aggregateScore: result.aggregateScore,
+            subjectScores: (result.subjectResults || []).map(s => ({
+                name: s.subjectName.toUpperCase(),
+                correct: s.correctCount,
+                total: s.totalQuestions,
+                score: s.weightedScore2,
+                timeSpent: examSession?.subjectAnalysis?.find(a => a.subjectName.toLowerCase() === s.subjectName.toLowerCase())?.secondsSpent || 0
+            })),
             detailedAnswers
         });
-    } catch (err) {
-        console.error("PDF Data Error:", err);
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
 
 
 
