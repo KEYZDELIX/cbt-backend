@@ -494,18 +494,18 @@ app.post('/api/exams/start-exam', async (req, res) => {
     try {
         const { userId, examId } = req.body;
 
-        // 1. Check if examId was actually sent
         if (!examId) {
             return res.status(400).json({ error: "No Exam ID provided" });
         }
 
+        // Search for an existing active session for this specific blueprint
         let exam = await Exam.findOne({ userId, examId, status: 'active' });
 
         if (!exam) {
             const user = await User.findById(userId);
             if (!user) return res.status(404).json({ error: "User not found" });
 
-            // 2. Check allocations with "Optional Chaining" (?.) to prevent crashes
+            // Safety check for allocations
             const allocation = user.examAllocations?.find(a => 
                 a.examId?.toString() === examId.toString()
             );
@@ -517,17 +517,21 @@ app.post('/api/exams/start-exam', async (req, res) => {
                 });
             }
 
+            // Create the NEW session
             exam = new Exam({
                 userId: user._id,
-                examId: examId, 
+                examId: examId, // Blueprint ID
                 subjectCombination: user.subjectCombination, 
                 status: 'active',
                 startTime: new Date()
             });
-            await exam.();
+            
+            // FIXED: Added .save()
+            await exam.save(); 
         }
 
-        res.json({ examId: exam._id });
+        // Return the unique SESSION ID (_id)
+        res.json({ examId: exam._id }); 
     } catch (err) {
         console.error("Start Exam Error:", err);
         res.status(500).json({ error: err.message });
