@@ -970,81 +970,86 @@ app.get('/api/exams/attempts/:examId', async (req, res) => {
     try {
         const { examId } = req.params;
         
-        // Find all results for this exam config
-        const results = await Result.find({ examId });
+        // 1. Find all results and "Join" the User data in one query
+        const results = await Result.find({ examId })
+            .populate('userId', 'firstName lastName regNo regNumber')
+            .lean(); // .lean() makes the query faster by returning plain JS objects
         
-        // We need to get student names from the User model based on the results
-        const studentData = await Promise.all(results.map(async (r) => {
-            const user = await User.findById(r.userId);
+        // 2. Map the data into the format your frontend expects
+        const studentData = results.map(r => {
+            const user = r.userId;
             return {
-                regNo: user ? user.regNo : "Unknown",
-                name: user ? `${user.firstName} ${user.lastName}` : "Deleted User",
-                status: "Submitted", // If it's in Results, it's finished
-                score: r.totalWeightedScore,
-                userId: r.userId
+                userId: user?._id,
+                regNo: user?.regNumber || user?.regNo || "N/A",
+                name: user ? `${user.firstName} ${user.lastName}`.toUpperCase() : "DELETED USER",
+                status: "Submitted",
+                // Use aggregateScore or totalWeightedScore as fallback
+                score: r.aggregateScore ?? r.totalWeightedScore ?? 0,
+                examDate: r.examDate
             };
-        }));
+        });
 
         res.json(studentData);
     } catch (err) {
+        console.error("Attempts Fetch Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
+
 // POST: Reset exam progress
 app.post('/api/exams/reset/:examId', async (req, res) => {
     try {
-        const { examId } = req.params; // This is the ExamConfig ID
+        const { examId } = req.params; 
         const { type, regNumbers } = req.body;
 
-        console.log(`Starting reset for Exam: ${examId}, Type: ${type}`);
-
-        // 1. Identify target users
         let userQuery = {};
-        if (type === 'selected') {
-            userQuery.regNo = { $in: regNumbers };
+        if (type === 'selected' && regNumbers) {
+            // FIX: Search across both possible field names and ensure they are treated as strings
+            const searchTerms = regNumbers.map(r => String(r));
+            userQuery = {
+                $or: [
+                    { regNo: { $in: searchTerms } },
+                    { regNumber: { $in: searchTerms } }
+                ]
+            };
         } else {
-            // If 'all', we find everyone who has this exam in their allocations
+            // FIX: Ensure we are looking for the allocation properly
             userQuery = { "examAllocations.examId": examId };
         }
 
         const targetUsers = await User.find(userQuery);
-        const userIds = targetUsers.map(u => u._id);
         
-        console.log(`Found ${userIds.length} users to reset.`);
-
-        if (userIds.length === 0) {
-            return res.status(404).json({ message: "No users found to reset." });
+        if (!targetUsers || targetUsers.length === 0) {
+            console.log("No users found with query:", JSON.stringify(userQuery));
+            return res.status(404).json({ message: "No students found matching those Registration Numbers." });
         }
 
+        const userIds = targetUsers.map(u => u._id);
+
         // 2. Wipe Result records & Exam Sessions
-        // We use $in to catch everyone at once
+        // Note: Result.examId might be the Session ID or the Blueprint ID. 
+        // To be safe, we wipe both possibilities.
         const resDelete = await Result.deleteMany({ 
-            examId: examId, 
-            userId: { $in: userIds } 
+            userId: { $in: userIds },
+            $or: [{ examId: examId }, { examSessionId: examId }] 
         });
 
         const examDelete = await Exam.deleteMany({ 
-            examId: examId, 
-            userId: { $in: userIds } 
+            userId: { $in: userIds },
+            examId: examId // Blueprint ID link
         });
 
-        console.log(`Deleted Results: ${resDelete.deletedCount}, Deleted Sessions: ${examDelete.deletedCount}`);
-
         // 3. Reset the 'hasTaken' flag
-        // We update the User records where the allocation matches the examId
+        // Use updateMany with arrayFilters if you have multiple allocations
         const userUpdate = await User.updateMany(
-            { 
-                _id: { $in: userIds },
-                "examAllocations.examId": examId 
-            },
-            { $set: { "examAllocations.$.hasTaken": false } }
+            { _id: { $in: userIds } },
+            { $set: { "examAllocations.$[elem].hasTaken": false } },
+            { arrayFilters: [{ "elem.examId": examId }] }
         );
-
-        console.log(`Updated User Flags: ${userUpdate.modifiedCount}`);
 
         res.json({ 
             success: true, 
-            message: `Reset ${userIds.length} students. Results cleared: ${resDelete.deletedCount}` 
+            message: `Reset successful. Students: ${userIds.length}, Records Cleared: ${resDelete.deletedCount}` 
         });
 
     } catch (err) {
