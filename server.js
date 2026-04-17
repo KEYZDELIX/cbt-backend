@@ -729,29 +729,70 @@ app.get('/all-results', async (req, res) => {
 // GET ONE SPECIFIC RESULT (For PDF and Result Portal)
 app.get('/results/:id', async (req, res) => {
     try {
-        // Find the specific result by its ID and pull student info
         const result = await Result.findById(req.params.id)
-            .populate('userId', 'firstName lastName middleName regNumber');
+            .populate('userId', 'firstName lastName middleName regNumber gender');
 
-        if (!result) {
-            return res.status(404).json({ error: "Result not found" });
+        if (!result) return res.status(404).json({ error: "Result not found" });
+
+        // Populate examId to get the title from ExamConfig
+        const examSession = await Exam.findById(result.examId)
+            .populate('examId'); 
+
+        // Helper to ensure images have full URLs for the PDF generator
+        const getFullUrl = (path) => {
+            if (!path) return null;
+            if (path.startsWith('http')) return path;
+            // Uses your backend BASE_URL (e.g., http://localhost:5000)
+            return `${process.env.BASE_URL || 'http://localhost:5000'}/${path.replace(/^\//, '')}`;
+        };
+
+        const detailedAnswers = [];
+        if (examSession && examSession.responses.length > 0) {
+            for (const resp of examSession.responses) {
+                const question = await mongoose.model('Question').findById(resp.questionId);
+                if (question) {
+                    detailedAnswers.push({
+                        subject: resp.subject,
+                        questionText: question.questionText,
+                        questionImage: getFullUrl(question.questionImage),
+                        userChoice: resp.selectedOptionKey || "Skipped",
+                        correctKey: question.correctOptionKey,
+                        isCorrect: resp.selectedOptionKey === question.correctOptionKey,
+                        options: (question.options || []).map(opt => ({
+                            ...opt.toObject(),
+                            optionImage: getFullUrl(opt.optionImage)
+                        }))
+                    });
+                }
+            }
         }
 
-        // Map the data to match exactly what your PDF function expects
         const responseData = {
             studentName: `${result.userId.firstName} ${result.userId.lastName}`,
             regNo: result.userId.regNumber,
-            examTitle: result.examTitle || "CBT Examination",
-            totalScore: result.aggregateScore || result.totalScore, // Adjust to your field name
-            totalTimeSpent: result.totalTimeSpent,
-            subjectScores: result.subjectScores, // Array of subject performance
-            detailedAnswers: result.detailedAnswers // The "Script" (questions/answers)
+            gender: result.userId.gender,
+            // UPDATED: Pulling 'title' from ExamConfig
+            examTitle: examSession?.examId?.title || "Standard CBT Examination", 
+            examDate: result.examDate,
+            aggregateScore: result.aggregateScore,
+            totalTimeTaken: result.timeTaken,
+            subjectScores: result.subjectResults.map(s => {
+                const timeData = examSession ? examSession.subjectAnalysis.find(a => a.subjectName === s.subjectName) : null;
+                return {
+                    name: s.subjectName,
+                    correct: s.correctCount,
+                    total: s.totalQuestions,
+                    score: s.normalizedScore2,
+                    timeSpent: timeData ? timeData.secondsSpent : 0
+                };
+            }),
+            detailedAnswers: detailedAnswers
         };
 
         res.json(responseData);
     } catch (err) {
-        console.error("Error fetching single result:", err);
-        res.status(500).json({ error: "Server error fetching result" });
+        console.error("Backend Error:", err);
+        res.status(500).json({ error: err.message });
     }
 });
 
