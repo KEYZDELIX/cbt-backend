@@ -1054,73 +1054,75 @@ router.post('/publish', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { regNumber, password } = req.body;
-
         const user = await User.findOne({ 
             regNo: regNumber.trim().toUpperCase(), 
             plainPassword: password.trim() 
         });
 
-        if (!user) {
-            return res.status(401).json({ message: "Invalid Registration Number or PIN" });
-        }
+        if (!user) return res.status(401).json({ message: "Invalid Registration Number or PIN" });
 
-        // Logic for time-windows
         const now = new Date();
         const gracePeriod = 30 * 60 * 1000; // 30 mins
-        
-        // Get the specific allocation for the current time frame
-        const allocation = user.examAllocations[0]; // Simplified for this example
-        if (!allocation) return res.status(404).json({ message: "No allocation found" });
 
-        const startTime = new Date(allocation.startTime).getTime();
-        const endTime = new Date(allocation.endTime).getTime();
-        const currentTime = now.getTime();
+        // Process ALL allocations to determine their current state
+        const processedAllocations = await Promise.all(user.examAllocations.map(async (alloc) => {
+            const startTime = new Date(alloc.startTime).getTime();
+            const endTime = new Date(alloc.endTime).getTime();
+            const currentTime = now.getTime();
 
-        let examStatus = "none";
-        if (currentTime < (startTime - gracePeriod)) {
-            examStatus = "scheduled";
-        } else if (currentTime < startTime) {
-            examStatus = "upcoming"; 
-        } else if (currentTime >= startTime && currentTime <= endTime) {
-            examStatus = "active";
-        } else if (currentTime > endTime && currentTime <= (endTime + gracePeriod)) {
-            examStatus = "ended";
-        } else {
-            examStatus = "expired";
-        }
+            let status = "expired";
+            let canClick = false;
 
-        // Check for resume session
-        const existingSession = await Exam.findOne({ 
-            userId: user._id, 
-            examId: allocation.examId, // Blueprint link
-            status: 'active' 
-        });
+            // 1. Check if already submitted
+            if (alloc.hasTaken) {
+                status = "submitted";
+                canClick = false;
+            } 
+            // 2. Check if Active (within start/end time)
+            else if (currentTime >= (startTime - gracePeriod) && currentTime <= endTime) {
+                status = "active";
+                canClick = true;
+            }
+            // 3. Check if Upcoming
+            else if (currentTime < startTime) {
+                status = "scheduled";
+                canClick = false;
+            }
+            // 4. Check if Ended (within grace period after end)
+            else if (currentTime > endTime && currentTime <= (endTime + gracePeriod)) {
+                status = "ended";
+                canClick = false; 
+            }
 
-        // Update login tracking
-        user.isLogin = true;
-        user.lastLogin = now; 
-        await user.save();
+            // Look for a resume-able session
+            const session = await Exam.findOne({ 
+                userId: user._id, 
+                examId: alloc.examId, 
+                status: 'active' 
+            });
+
+            return {
+                ...alloc.toObject(),
+                currentStatus: status,
+                canClick: canClick,
+                resumeSessionId: session ? session._id : null
+            };
+        }));
 
         res.json({
             success: true,
             user: {
                 _id: user._id,
                 firstName: user.firstName,
-                middleName: user.middleName,
-                lastName: user.lastName,
-                regNo: user.regNo,
                 subjectCombination: user.subjectCombination
             },
-            allocation,
-            examStatus,
-            resumeSessionId: existingSession ? existingSession._id : null
+            allocations: processedAllocations
         });
 
     } catch (err) {
         res.status(500).json({ message: "Server Error: " + err.message });
     }
 });
-
 
 
 // --- 1. START OR RESUME EXAM ---
