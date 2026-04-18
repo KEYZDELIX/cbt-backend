@@ -294,250 +294,6 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
 
 
 
-
-
-app.post('/api/auth/login', async (req, res) => {
-    try {
-        const { regNumber, password } = req.body;
-
-        // Ensure we are querying the correct field: 'regNo' and 'plainPassword'
-        const user = await User.findOne({ 
-            regNo: regNumber.trim().toUpperCase(), 
-            plainPassword: password.trim() 
-        });
-
-        if (!user) {
-            return res.status(401).json({ message: "Invalid Registration Number or PIN" });
-        }
-        // Find active exam allocation (With 30-minute grace period)
-const now = new Date();
-const gracePeriod = 30 * 60 * 1000; // 30 minutes in milliseconds
-
-const currentAllocation = user.examAllocations.find(alloc => {
-    const start = new Date(alloc.startTime).getTime() - gracePeriod;
-    const end = new Date(alloc.endTime).getTime() + gracePeriod;
-    const currentTime = now.getTime();
-    
-    return currentTime >= start && currentTime <= end;
-});
-
-        // Check for an existing session to resume
-        const existingSession = await Exam.findOne({ 
-            userId: user._id, 
-            status: 'active' 
-        });
-
-        // Send a clean object back to the frontend
-        res.json({
-            success: true,
-            user: {
-                _id: user._id,
-                firstName: user.firstName,
-                middleName: user.middleName || "",
-                lastName: user.lastName,
-                regNo: user.regNo,
-                subjectCombination: user.subjectCombination
-            },
-            allocation: currentAllocation || null,
-            resumeSessionId: existingSession ? existingSession._id : null
-        });
-        
-    } catch (err) {
-        console.error("Login Error:", err);
-        res.status(500).json({ message: "Internal Server Error: " + err.message });
-    }
-});
-
-
-// 4. Fetch Questions (Randomized by Subject)// --- UPDATED EXAM FETCHING WITH SHUFFLE ---
-
-async function getEnglishPaper(examConfigId) {
-    const paper = [];
-    const ExamConfig = require('./models/ExamConfig');
-    const config = await ExamConfig.findById(examConfigId);
-
-    if (!config || !config.englishDist || config.englishDist.length === 0) return [];
-
-    // Helper to shuffle questions within a specific block
-    const shuffle = (array) => array.sort(() => Math.random() - 0.5);
-
-    for (const dist of config.englishDist) {
-        try {
-            // Match the topic from your config (e.g., "Cloze Passage")
-            const isPassageTopic = ["Comprehension Passages", "Cloze Passage"].includes(dist.topic);
-
-            if (isPassageTopic) {
-                const passages = await Question.distinct("subSubTopic", { 
-                    subject: "Use of English",
-                    subTopic: dist.topic 
-                });
-
-                if (passages.length > 0) {
-                    const selectedPassage = passages[Math.floor(Math.random() * passages.length)];
-                    const passageQuestions = await Question.find({ 
-                        subject: "Use of English",
-                        subTopic: dist.topic,
-                        subSubTopic: selectedPassage
-                    });
-
-                    // For Passages: We usually keep them in order (1, 2, 3...) 
-                    // so the flow of the story makes sense.
-                    const orderedPassageQs = passageQuestions.sort((a, b) => a._id - b._id);
-                    paper.push(...orderedPassageQs.slice(0, dist.qty));
-                }
-            } else {
-                // For Lexis, Structure, Oral: 
-                // We  the requested quantity and then SHUFFLE them.
-                const qs = await Question.aggregate([
-                    { $match: { 
-                        subject: "Use of English", 
-                        subTopic: dist.topic 
-                    }},
-                    { $sample: { size: dist.qty } }
-                ]);
-                
-                if (qs.length > 0) {
-                    // Shuffle this specific batch so Student A and B 
-                    // see "Antonyms" in a different order.
-                    const shuffledBatch = shuffle(qs);
-                    paper.push(...shuffledBatch);
-                }
-            }
-        } catch (e) {
-            console.error(`Error in English Section ${dist.topic}:`, e);
-        }
-    }
-    return paper; 
-}
-
-// Helper to generate a batch-specific random pool with controlled overlap
-function getBatchPool(allQuestions, batchNum, questionsPerStudent) {
-    const totalAvailable = allQuestions.length;
-    // We want a pool size that gives variety but stays batch-consistent
-    // Ideally 1.5x the number of questions a student needs
-    const poolSize = Math.min(totalAvailable, Math.floor(questionsPerStudent * 1.5));
-    
-    // Use the batchNum to create a 'seeded' shuffle
-    // This ensures every student in Batch 1 sees the SAME pool
-    const seededShuffle = (arr, seed) => {
-        let m = arr.length, t, i;
-        while (m) {
-            i = Math.floor(Math.abs(Math.sin(seed++) * m--));
-            t = arr[m];
-            arr[m] = arr[i];
-            arr[i] = t;
-        }
-        return arr;
-    };
-
-    // Shuffle the entire bank based on Batch Number
-    const batchSpecificOrderedBank = seededShuffle([...allQuestions], batchNum * 123);
-    
-    // Take the first 'poolSize' questions. 
-    // Because of the seed, Batch 1 and Batch 2 will have different starting orders
-    // and therefore different pools, but with natural overlap.
-    return batchSpecificOrderedBank.slice(0, poolSize);
-}
-
-app.get('/api/exams/fetch-questions/:examId', async (req, res) => {
-    try {
-        const { examId } = req.params;
-        const session = await Exam.findById(examId).populate('userId');
-        const config = await ExamConfig.findById(session.examId);
-        const batchNumber = session.batchId || 1;
-
-        let subjects = session.subjectCombination || session.userId.subjectCombination;
-        const results = [];
-
-        for (const sub of subjects) {
-            const qtyNeeded = sub === "Use of English" ? 60 : 40;
-            let finalQuestions = [];
-
-            if (sub === "Use of English") {
-                // English follows the Sectional Flow logic we built earlier
-                finalQuestions = await getEnglishPaper(config._id);
-            } else {
-                const allSubQuestions = await Question.find({ subject: sub });
-                
-                // 1. Generate the Pool for this specific Batch
-                const batchPool = getBatchPool(allSubQuestions, batchNumber, qtyNeeded);
-
-                // 2. Pull the student's specific set from that Batch Pool
-                // We use standard random shuffle here so students in the same batch 
-                // have different orders and slightly different questions
-                const studentSet = batchPool
-                    .sort(() => Math.random() - 0.5)
-                    .slice(0, qtyNeeded);
-
-                finalQuestions = studentSet.map(q => {
-                    const plainQ = q.toObject();
-                    return {
-                        ...plainQ,
-                        questionText: plainQ.questionText || plainQ.question,
-                        options: plainQ.options ? [...plainQ.options].sort(() => 0.5 - Math.random()) : []
-                    };
-                });
-            }
-
-            results.push({ subject: sub, questions: finalQuestions });
-        }
-        res.json(results);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-
-
-
-app.post('/api/exams/start-exam', async (req, res) => {
-    try {
-        const { userId, examId } = req.body;
-
-        if (!examId) {
-            return res.status(400).json({ error: "No Exam ID provided" });
-        }
-
-        // Search for an existing active session for this specific blueprint
-        let exam = await Exam.findOne({ userId, examId, status: 'active' });
-
-        if (!exam) {
-            const user = await User.findById(userId);
-            if (!user) return res.status(404).json({ error: "User not found" });
-
-            // Safety check for allocations
-            const allocation = user.examAllocations?.find(a => 
-                a.examId?.toString() === examId.toString()
-            );
-
-            if (allocation && allocation.hasTaken) {
-                return res.status(403).json({ 
-                    error: "EXAM_ALREADY_TAKEN", 
-                    message: "You have already submitted this exam attempt." 
-                });
-            }
-
-            // Create the NEW session
-            exam = new Exam({
-                userId: user._id,
-                examId: examId, // Blueprint ID
-                subjectCombination: user.subjectCombination, 
-                status: 'active',
-                startTime: new Date()
-            });
-            
-            // FIXED: Added .save()
-            await exam.save(); 
-        }
-
-        // Return the unique SESSION ID (_id)
-        res.json({ examId: exam._id }); 
-    } catch (err) {
-        console.error("Start Exam Error:", err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
 // Optimized View Script: Shows ONLY questions the student answered
 
 app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
@@ -619,153 +375,10 @@ app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
 
 
 
-// POST /api/exams/submit-exam
-
-
-app.post('/api/exams/submit-exam', async (req, res) => {
-    try {
-        const { userId, examId, responses, subjectAnalysis, totalSecondsRemaining, status } = req.body;
-
-        // 1. Update/Create the Exam Session (Session ID is examId here)
-        const updatedExam = await Exam.findOneAndUpdate(
-            { _id: examId, userId },
-            { 
-                $set: { 
-                    responses, 
-                    subjectAnalysis, 
-                    totalSecondsRemaining, 
-                    status, 
-                    endTime: (status === 'submitted' || status === 'timed-out') ? new Date() : null 
-                } 
-            },
-            { new: true }
-        );
-
-        if (!updatedExam) {
-            return res.status(404).json({ error: "Exam session not found." });
-        }
-
-        // 2. SCORING ENGINE
-        const subjectResults = [];
-        const userSubjects = updatedExam.subjectCombination || [];
-        let runningPreciseSum = 0;
-
-        for (const subName of userSubjects) {
-            const isEnglish = subName.toLowerCase().includes('english');
-            const expectedTotal = isEnglish ? 60 : 40;
-
-            // Fetch pool to calculate "Perfect Weight" denominator
-            const poolQuestions = await Question.find({ subject: subName });
-            const actualCountInDb = poolQuestions.length;
-            const weightInDb = poolQuestions.reduce((acc, q) => acc + (q.weight || 1), 0);
-
-            // JAMB-Standard Denominator logic
-            let totalPossibleWeight;
-            if (actualCountInDb < expectedTotal) {
-                const missingCount = expectedTotal - actualCountInDb;
-                totalPossibleWeight = weightInDb + (missingCount * 1.0);
-            } else {
-                totalPossibleWeight = weightInDb;
-            }
-
-            // Calculate Student Performance
-            const subResponses = responses.filter(r => r.subject === subName);
-            let correctCount = 0;
-            let earnedWeight = 0;
-
-            for (const resp of subResponses) {
-                const q = poolQuestions.find(item => item._id.toString() === resp.questionId.toString());
-                if (q && q.correctOptionKey) {
-                    if (q.correctOptionKey.trim().toUpperCase() === resp.selectedOptionKey.trim().toUpperCase()) {
-                        correctCount++;
-                        earnedWeight += (q.weight || 1);
-                    }
-                }
-            }
-
-            // Calculations
-            const rScore1 = (correctCount / expectedTotal) * 100;
-            const wScore1 = totalPossibleWeight > 0 ? (earnedWeight / totalPossibleWeight) * 100 : 0;
-
-            subjectResults.push({
-                subjectName: subName,
-                correctCount,
-                totalQuestions: expectedTotal,
-                rawScore1: rScore1,
-                rawScore2: Math.round(rScore1),
-                weightedScore1: wScore1,
-                weightedScore2: Math.round(wScore1),
-                normalizedScore1: wScore1, // Initial fallback
-                normalizedScore2: Math.round(wScore1)
-            });
-
-            runningPreciseSum += wScore1;
-        }
-
-        const totalWeightedInteger = Math.round(subjectResults.reduce((acc, s) => acc + s.weightedScore2, 0));
-
-        // 3. Update the Result Record
-        // Use updatedExam.examId (the blueprint ID) for the result grouping
-        const finalResult = await Result.findOneAndUpdate(
-            { userId, examId: updatedExam._id },
-            { 
-                userId, 
-                examId: updatedExam.examId, // Blueprint link
-                examSessionId: updatedExam._id, // Specific attempt link
-                subjectResults, 
-                aggregateScore: totalWeightedInteger, 
-                totalWeightedScore: totalWeightedInteger,
-                preciseRankingScore: parseFloat(runningPreciseSum.toFixed(3)), // For Ranking
-                timeTaken: 7200 - totalSecondsRemaining,
-                examDate: new Date()
-            },
-            { upsert: true, new: true }
-        );
-
-        // 4. Finalize & Normalize
-        if (status === 'submitted' || status === 'timed-out') {
-            // Mark user allocation as taken
-            await User.updateOne(
-                { _id: userId, "examAllocations.examId": updatedExam.examId },
-                { $set: { "examAllocations.$.hasTaken": true } }
-            );
-            
-            // Run the Statistical Curve (Normalization)
-            try {
-                // Pass the Result model and the Blueprint ID
-                await runNormalization(Result, updatedExam.examId);
-            } catch (nErr) {
-                console.error("Normalization Trigger Error:", nErr);
-            }
-
-            return res.json({ 
-                success: true, 
-                status: "finished", 
-                aggregate: finalResult.aggregateScore,
-                precise: finalResult.preciseRankingScore 
-            });
-        }
-
-        // Response for Auto-save (Active writing)
-        res.json({ 
-            success: true, 
-            status: "active", 
-            currentAggregate: totalWeightedInteger 
-        });
-
-    } catch (err) {
-        console.error("Critical Submit Error:", err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
 
 // 7. Admin: View All Results
-
 app.get('/all-results', async (req, res) => {
     try {
-        // 1. Fetch results and populate User data
-        // We include 'examAllocations' to extract the Batch Number
         const results = await Result.find()
             .populate('userId', 'firstName lastName middleName regNumber regNo gender examAllocations')
             .sort({ preciseRankingScore: -1 });
@@ -773,40 +386,40 @@ app.get('/all-results', async (req, res) => {
         const cleanedResults = results.map(r => {
             const user = r.userId;
             
-            // 2. Extract the Batch ID from the specific allocation
-            // We find the allocation where the examId matches the Result's examId
-            let batchNumber = "N/A";
+            // FIND THE RIGHT BATCH:
+            // Look through the student's allocations for the one that matches this Result's examId
+            let assignedBatch = "1"; // Default fallback
             if (user && user.examAllocations) {
-                const allocation = user.examAllocations.find(alloc => 
-                    alloc.examId.toString() === r.examId.toString()
+                const matchingAllocation = user.examAllocations.find(alloc => 
+                    alloc.examId && alloc.examId.toString() === r.examId.toString()
                 );
-                batchNumber = allocation ? (allocation.batch || allocation.batchId || "1") : "1";
+                if (matchingAllocation) {
+                    assignedBatch = matchingAllocation.batch || matchingAllocation.batchId || "1";
+                }
             }
 
             return {
                 _id: r._id,
-                // Full name construction
-                studentName: user ? `${user.firstName} ${user.middleName || ''} ${user.lastName}`.trim().toUpperCase() : "UNKNOWN",
-                // Handle both registration number field possibilities
+                examId: r.examId,
                 regNo: user?.regNumber || user?.regNo || "N/A",
+                studentName: `${user?.lastName || ''}, ${user?.firstName || ''} ${user?.middleName || ''}`.trim().toUpperCase(),
                 gender: user?.gender || "N/A",
-                // Dynamic Batch from User Allocations
-                batchId: batchNumber,
-                // Scores
+                // THIS IS THE KEY:
+                batchId: assignedBatch, 
                 aggregateScore: r.aggregateScore || 0,
                 preciseRankingScore: r.preciseRankingScore || 0,
                 examDate: r.examDate,
-                // Include subject results for the table expansion if needed
-                subjectResults: r.subjectResults
+                subjectResults: r.subjectResults || []
             };
         });
 
         res.json(cleanedResults);
     } catch (err) {
-        console.error("All-Results Fetch Error:", err);
+        console.error("All-Results Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
+
 
 
 // GET ONE SPECIFIC RESULT (For PDF and Result Portal)
@@ -1431,6 +1044,291 @@ router.post('/publish', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+
+
+
+
+///// EXAMINATION  (INDEX.HTML) ///////////
+
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { regNumber, password } = req.body;
+
+        const user = await User.findOne({ 
+            regNo: regNumber.trim().toUpperCase(), 
+            plainPassword: password.trim() 
+        });
+
+        if (!user) {
+            return res.status(401).json({ message: "Invalid Registration Number or PIN" });
+        }
+
+        // Logic for time-windows
+        const now = new Date();
+        const gracePeriod = 30 * 60 * 1000; // 30 mins
+        
+        // Get the specific allocation for the current time frame
+        const allocation = user.examAllocations[0]; // Simplified for this example
+        if (!allocation) return res.status(404).json({ message: "No allocation found" });
+
+        const startTime = new Date(allocation.startTime).getTime();
+        const endTime = new Date(allocation.endTime).getTime();
+        const currentTime = now.getTime();
+
+        let examStatus = "none";
+        if (currentTime < (startTime - gracePeriod)) {
+            examStatus = "scheduled";
+        } else if (currentTime < startTime) {
+            examStatus = "upcoming"; 
+        } else if (currentTime >= startTime && currentTime <= endTime) {
+            examStatus = "active";
+        } else if (currentTime > endTime && currentTime <= (endTime + gracePeriod)) {
+            examStatus = "ended";
+        } else {
+            examStatus = "expired";
+        }
+
+        // Check for resume session
+        const existingSession = await Exam.findOne({ 
+            userId: user._id, 
+            examId: allocation.examId, // Blueprint link
+            status: 'active' 
+        });
+
+        // Update login tracking
+        user.isLogin = true;
+        user.lastLogin = now; 
+        await user.save();
+
+        res.json({
+            success: true,
+            user: {
+                _id: user._id,
+                firstName: user.firstName,
+                middleName: user.middleName,
+                lastName: user.lastName,
+                regNo: user.regNo,
+                subjectCombination: user.subjectCombination
+            },
+            allocation,
+            examStatus,
+            resumeSessionId: existingSession ? existingSession._id : null
+        });
+
+    } catch (err) {
+        res.status(500).json({ message: "Server Error: " + err.message });
+    }
+});
+
+
+
+// --- 1. START OR RESUME EXAM ---
+app.post('/api/exams/start-exam', async (req, res) => {
+    try {
+        const { userId, examId } = req.body; // examId is the ExamConfig ID
+
+        if (!examId) return res.status(400).json({ error: "No Exam ID provided" });
+
+        // Search for an existing active session to resume
+        let examSession = await Exam.findOne({ userId, examId: examId, status: 'active' });
+
+        if (!examSession) {
+            const user = await User.findById(userId);
+            if (!user) return res.status(404).json({ error: "User not found" });
+
+            // Check if user already finished this exam
+            const allocation = user.examAllocations?.find(a => a.examId.toString() === examId.toString());
+            if (allocation && allocation.hasTaken) {
+                return res.status(403).json({ error: "EXAM_ALREADY_TAKEN" });
+            }
+
+            // Create NEW session
+            examSession = new Exam({
+                userId: user._id,
+                examId: examId, // Blueprint link
+                subjectCombination: user.subjectCombination,
+                status: 'active',
+                startTime: new Date(),
+                responses: [],
+                subjectAnalysis: [] // Initialize for time tracking
+            });
+            await examSession.save();
+        }
+
+        res.json({ examId: examSession._id });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- 2. FETCH QUESTIONS (With Batching & English Logic) ---
+app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
+    try {
+        const session = await Exam.findById(req.params.sessionId).populate('userId');
+        if (!session) return res.status(404).json({ error: "Session not found" });
+
+        // RESUMPTION LOGIC: If questions are already assigned, return them exactly
+        if (session.questionsServed && session.questionsServed.length > 0) {
+            const questions = await Question.find({ _id: { $in: session.questionsServed } });
+            // Group by subject for the frontend
+            const results = session.subjectCombination.map(sub => ({
+                subject: sub,
+                questions: questions.filter(q => q.subject === sub)
+            }));
+            return res.json(results);
+        }
+
+        // FRESH GENERATION LOGIC:
+        const config = await ExamConfig.findById(session.examId);
+        const batchNumber = session.userId.batchNumber || 1;
+        const results = [];
+        let allServedIds = [];
+
+        for (const sub of session.subjectCombination) {
+            let finalQuestions = [];
+
+            if (sub === "Use of English") {
+                finalQuestions = await getEnglishPaper(config._id, batchNumber);
+            } else {
+                const qtyNeeded = 40;
+                const allSubQuestions = await Question.find({ subject: sub });
+                const batchPool = getBatchPool(allSubQuestions, batchNumber, qtyNeeded);
+                
+                // Shuffle the pool for the student
+                finalQuestions = batchPool.sort(() => Math.random() - 0.5).slice(0, qtyNeeded);
+            }
+
+            // Sanitize and shuffle options
+            const sanitized = finalQuestions.map(q => {
+                const plain = q.toObject();
+                return {
+                    ...plain,
+                    questionText: plain.questionText || plain.question,
+                    options: plain.options ? [...plain.options].sort(() => 0.5 - Math.random()) : []
+                };
+            });
+
+            results.push({ subject: sub, questions: sanitized });
+            allServedIds.push(...sanitized.map(q => q._id));
+        }
+
+        // Lock these questions to the session
+        session.questionsServed = allServedIds;
+        await session.save();
+
+        res.json(results);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- 3. AUTO-SAVE & SUBMIT ---
+app.post('/api/exams/submit-exam', async (req, res) => {
+    try {
+        const { examId, responses, status, totalSecondsRemaining, subjectAnalysis } = req.body;
+        const session = await Exam.findById(examId);
+
+        if (!session) return res.status(404).json({ error: "Session not found" });
+
+        session.responses = responses;
+        session.status = status;
+        session.totalSecondsRemaining = totalSecondsRemaining;
+        if (subjectAnalysis) session.subjectAnalysis = subjectAnalysis;
+
+        if (status === 'submitted' || status === 'timed-out') {
+            session.endTime = new Date();
+            
+            // Mark user allocation as taken
+            await User.updateOne(
+                { _id: session.userId, "examAllocations.examId": session.examId },
+                { $set: { "examAllocations.$.hasTaken": true } }
+            );
+
+            // Calculate scores for the result modal
+            const subjectResults = await calculateScore(responses);
+            await session.save();
+            return res.json({ success: true, data: { subjectResults } });
+        }
+
+        await session.save();
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+async function getEnglishPaper(examConfigId, batchNumber) {
+    const paper = [];
+    const config = await ExamConfig.findById(examConfigId);
+    
+    for (const dist of config.englishDist) {
+        const isPassage = ["Comprehension Passage", "Cloze Passage"].includes(dist.topic);
+
+        if (isPassage) {
+            const passages = await Question.distinct("subSubTopic", { 
+                subject: "Use of English", subTopic: dist.topic 
+            });
+            // Use batchNumber to pick the passage so it's consistent for that batch
+            const selectedPassage = passages[batchNumber % passages.length];
+            const qs = await Question.find({ 
+                subject: "Use of English", subSubTopic: selectedPassage 
+            }).sort({ _id: 1 }); // Maintain story order
+            
+            paper.push(...qs.slice(0, dist.qty));
+        } else {
+            // Randomly sample for Lexis/Structure
+            const others = await Question.aggregate([
+                { $match: { subject: "Use of English", subTopic: dist.topic } },
+                { $sample: { size: dist.qty } }
+            ]);
+            paper.push(...others);
+        }
+    }
+    return paper;
+}
+
+// Deterministic Batch Pool (Seeded)
+function getBatchPool(allQuestions, batchNum, questionsPerStudent) {
+    const totalAvailable = allQuestions.length;
+    const poolSize = Math.min(totalAvailable, Math.floor(questionsPerStudent * 1.5));
+    
+    const seededShuffle = (arr, seed) => {
+        let m = arr.length, t, i;
+        while (m) {
+            i = Math.floor(Math.abs(Math.sin(seed++) * m--));
+            t = arr[m]; arr[m] = arr[i]; arr[i] = t;
+        }
+        return arr;
+    };
+
+    const batchSpecificBank = seededShuffle([...allQuestions], batchNum * 123);
+    return batchSpecificBank.slice(0, poolSize);
+}
+
+// Result Calculator
+async function calculateScore(responses) {
+    const qIds = responses.map(r => r.questionId);
+    const questions = await Question.find({ _id: { $in: qIds } });
+    
+    const stats = {};
+    responses.forEach(res => {
+        const q = questions.find(item => item._id.toString() === res.questionId);
+        if (!q) return;
+        if (!stats[q.subject]) stats[q.subject] = { correct: 0, total: 0 };
+        
+        stats[q.subject].total++;
+        if (res.selectedOptionKey === q.answer) stats[q.subject].correct++;
+    });
+
+    return Object.keys(stats).map(name => ({
+        subjectName: name,
+        correctCount: stats[name].correct,
+        totalQuestions: stats[name].total
+    }));
+}
+
+
 
 module.exports = router;
 // Server Initialization

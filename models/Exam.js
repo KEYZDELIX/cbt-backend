@@ -10,10 +10,11 @@ const ExamSchema = new mongoose.Schema({
   
   // ADD THIS LINE
   subjectCombination: [String], 
-
+  questionsServed: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Question' }],
   responses: [{
     questionId: String,
     selectedOptionKey: String,
+    isCorrect: Boolean,
     subject: String,
     timestamp: { type: Date, default: Date.now }
   }],
