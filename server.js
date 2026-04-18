@@ -1238,16 +1238,17 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
 // --- 3. AUTO-SAVE & SUBMIT ---
 app.post('/api/exams/submit-exam', async (req, res) => {
     try {
-        const { examId, responses, status, totalSecondsRemaining, subjectAnalysis } = req.body;
+        const { examId, responses, status, totalSecondsRemaining } = req.body;
+        
+        // 1. Update the Session (The 'Attempt')
         const session = await Exam.findById(examId);
-
         if (!session) return res.status(404).json({ error: "Session not found" });
 
         session.responses = responses;
         session.status = status;
         session.totalSecondsRemaining = totalSecondsRemaining;
-        if (subjectAnalysis) session.subjectAnalysis = subjectAnalysis;
 
+        // 2. Handle Final Submission
         if (status === 'submitted' || status === 'timed-out') {
             session.endTime = new Date();
             
@@ -1257,15 +1258,46 @@ app.post('/api/exams/submit-exam', async (req, res) => {
                 { $set: { "examAllocations.$.hasTaken": true } }
             );
 
-            // Calculate scores for the result modal
-            const subjectResults = await calculateScore(responses);
+            // 3. Perform Detailed Grading
+            // Assuming calculateScore returns data matching your ResultSchema.subjectResults
+            const subjectResults = await calculateScore(responses, session.examId);
+            
+            const totalCorrect = subjectResults.reduce((acc, curr) => acc + curr.correctCount, 0);
+            const totalQuestions = subjectResults.reduce((acc, curr) => acc + curr.totalQuestions, 0);
+            
+            // Create the entry in your Result Collection
+            const finalResult = await Result.create({
+                userId: session.userId,
+                examId: session.examId,
+                examSessionId: session._id, // This links the specific attempt
+                subjectResults: subjectResults,
+                aggregateScore: subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore2 || 0), 0),
+                preciseRankingScore: subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore1 || 0), 0),
+                timeTaken: (120 * 60) - totalSecondsRemaining, // Calculate time spent
+                examDate: new Date()
+            });
+
             await session.save();
-            return res.json({ success: true, data: { subjectResults } });
+
+            // Return the results for the frontend modal
+            return res.json({ 
+                success: true, 
+                data: { 
+                    subjectResults,
+                    totalScore: totalCorrect,
+                    expectedTotal: 180, // Fixed expected total for JAMB context
+                    resultId: finalResult._id,
+                    message: "Full results and scripts will be sent to your registered email later."
+                } 
+            });
         }
 
+        // Handle Auto-save (just save the session, no result record yet)
         await session.save();
         res.json({ success: true });
+
     } catch (err) {
+        console.error("Submission Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
