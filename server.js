@@ -1054,58 +1054,53 @@ router.post('/publish', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { regNumber, password } = req.body;
+        
+        // Find user and normalize Reg Number
         const user = await User.findOne({ 
             regNo: regNumber.trim().toUpperCase(), 
             plainPassword: password.trim() 
         });
 
-        if (!user) return res.status(401).json({ message: "Invalid Registration Number or PIN" });
+        if (!user) {
+            return res.status(401).json({ message: "Invalid Registration Number or PIN" });
+        }
 
-        const now = new Date();
-        const gracePeriod = 30 * 60 * 1000; // 30 mins
+        const now = new Date().getTime();
+        const gracePeriod = 30 * 60 * 1000; // 30-minute window before start
 
-        // Process ALL allocations to determine their current state
+        // Process allocations using Promise.all for database efficiency
         const processedAllocations = await Promise.all(user.examAllocations.map(async (alloc) => {
-            const startTime = new Date(alloc.startTime).getTime();
-            const endTime = new Date(alloc.endTime).getTime();
-            const currentTime = now.getTime();
+            const a = alloc.toObject ? alloc.toObject() : alloc;
+            
+            const start = new Date(a.startTime).getTime();
+            const end = new Date(a.endTime).getTime();
 
-            let status = "expired";
+            let status = "scheduled";
             let canClick = false;
 
-            // 1. Check if already submitted
-            if (alloc.hasTaken) {
+            // 1. Determine Status
+            if (a.hasTaken) {
                 status = "submitted";
-                canClick = false;
-            } 
-            // 2. Check if Active (within start/end time)
-            else if (currentTime >= (startTime - gracePeriod) && currentTime <= endTime) {
+            } else if (now >= (start - gracePeriod) && now <= end) {
                 status = "active";
                 canClick = true;
-            }
-            // 3. Check if Upcoming
-            else if (currentTime < startTime) {
-                status = "scheduled";
-                canClick = false;
-            }
-            // 4. Check if Ended (within grace period after end)
-            else if (currentTime > endTime && currentTime <= (endTime + gracePeriod)) {
-                status = "ended";
-                canClick = false; 
+            } else if (now > end) {
+                status = "expired";
             }
 
-            // Look for a resume-able session
-            const session = await Exam.findOne({ 
+            // 2. Look for an existing session to resume
+            // We search for a session linked to this specific blueprint (examId)
+            const existingSession = await Exam.findOne({ 
                 userId: user._id, 
-                examId: alloc.examId, 
+                examId: a.examId, 
                 status: 'active' 
             });
 
             return {
-                ...alloc.toObject(),
+                ...a,
                 currentStatus: status,
                 canClick: canClick,
-                resumeSessionId: session ? session._id : null
+                resumeSessionId: existingSession ? existingSession._id : null
             };
         }));
 
@@ -1114,16 +1109,18 @@ app.post('/api/auth/login', async (req, res) => {
             user: {
                 _id: user._id,
                 firstName: user.firstName,
+                lastName: user.lastName,
+                regNo: user.regNo,
                 subjectCombination: user.subjectCombination
             },
             allocations: processedAllocations
         });
 
     } catch (err) {
-        res.status(500).json({ message: "Server Error: " + err.message });
+        console.error("Login Error:", err);
+        res.status(500).json({ message: "Server Error during login authentication." });
     }
 });
-
 
 // --- 1. START OR RESUME EXAM ---
 app.post('/api/exams/start-exam', async (req, res) => {
