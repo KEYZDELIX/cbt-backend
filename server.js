@@ -1162,23 +1162,40 @@ app.post('/api/exams/start-exam', async (req, res) => {
 });
 
 // --- 2. FETCH QUESTIONS (With Batching & English Logic) ---
+
 app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
     try {
         const session = await Exam.findById(req.params.sessionId).populate('userId');
         if (!session) return res.status(404).json({ error: "Session not found" });
 
-        // RESUMPTION LOGIC: If questions are already assigned, return them exactly
+        // Helper to sanitize questions consistently for the frontend
+        const sanitize = (q) => {
+            const plain = q.toObject ? q.toObject() : q;
+            return {
+                ...plain,
+                questionText: plain.questionText || plain.question,
+                options: plain.options ? [...plain.options].sort(() => 0.5 - Math.random()) : []
+            };
+        };
+
+        // --- 1. RESUMPTION LOGIC ---
         if (session.questionsServed && session.questionsServed.length > 0) {
             const questions = await Question.find({ _id: { $in: session.questionsServed } });
-            // Group by subject for the frontend
+            
             const results = session.subjectCombination.map(sub => ({
                 subject: sub,
-                questions: questions.filter(q => q.subject === sub)
+                // Filter and sanitize each question in the resumption list
+                questions: questions.filter(q => q.subject === sub).map(sanitize)
             }));
-            return res.json(results);
+            
+            // Send back totalSecondsRemaining if your Exam model tracks it
+            return res.json({
+                subjects: results,
+                totalSecondsRemaining: session.totalSecondsRemaining 
+            });
         }
 
-        // FRESH GENERATION LOGIC:
+        // --- 2. FRESH GENERATION LOGIC ---
         const config = await ExamConfig.findById(session.examId);
         const batchNumber = session.userId.batchNumber || 1;
         const results = [];
@@ -1193,21 +1210,10 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
                 const qtyNeeded = 40;
                 const allSubQuestions = await Question.find({ subject: sub });
                 const batchPool = getBatchPool(allSubQuestions, batchNumber, qtyNeeded);
-                
-                // Shuffle the pool for the student
                 finalQuestions = batchPool.sort(() => Math.random() - 0.5).slice(0, qtyNeeded);
             }
 
-            // Sanitize and shuffle options
-            const sanitized = finalQuestions.map(q => {
-                const plain = q.toObject();
-                return {
-                    ...plain,
-                    questionText: plain.questionText || plain.question,
-                    options: plain.options ? [...plain.options].sort(() => 0.5 - Math.random()) : []
-                };
-            });
-
+            const sanitized = finalQuestions.map(sanitize);
             results.push({ subject: sub, questions: sanitized });
             allServedIds.push(...sanitized.map(q => q._id));
         }
@@ -1216,11 +1222,18 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         session.questionsServed = allServedIds;
         await session.save();
 
-        res.json(results);
+        // Consistent response structure
+        res.json({
+            subjects: results,
+            totalSecondsRemaining: session.totalSecondsRemaining || (120 * 60)
+        });
+
     } catch (err) {
+        console.error("Fetch Error:", err.message);
         res.status(500).json({ error: err.message });
     }
 });
+
 
 // --- 3. AUTO-SAVE & SUBMIT ---
 app.post('/api/exams/submit-exam', async (req, res) => {
@@ -1259,36 +1272,52 @@ app.post('/api/exams/submit-exam', async (req, res) => {
 
 async function getEnglishPaper(examConfigId, batchNumber) {
     const paper = [];
+    const ExamConfig = require('./models/ExamConfig'); // Ensure model is required
     const config = await ExamConfig.findById(examConfigId);
-    
-    for (const dist of config.englishDist) {
-        const isPassage = ["Comprehension Passage", "Cloze Passage"].includes(dist.topic);
 
-        if (isPassage) {
-            const passages = await Question.distinct("subSubTopic", { 
-                subject: "Use of English", subTopic: dist.topic 
-            });
-            // Use batchNumber to pick the passage so it's consistent for that batch
-            const selectedPassage = passages[batchNumber % passages.length];
-            const qs = await Question.find({ 
-                subject: "Use of English", subSubTopic: selectedPassage 
-            }).sort({ _id: 1 }); // Maintain story order
-            
-            paper.push(...qs.slice(0, dist.qty));
-        } else {
-            // Randomly sample for Lexis/Structure
-            const others = await Question.aggregate([
-                { $match: { subject: "Use of English", subTopic: dist.topic } },
-                { $sample: { size: dist.qty } }
-            ]);
-            paper.push(...others);
+    if (!config || !config.englishDist) return [];
+
+    for (const dist of config.englishDist) {
+        try {
+            const isPassageTopic = ["Comprehension Passage", "Cloze Passage"].includes(dist.topic);
+
+            if (isPassageTopic) {
+                const passages = await Question.distinct("subSubTopic", { 
+                    subject: "Use of English", 
+                    subTopic: dist.topic 
+                });
+
+                if (passages.length > 0) {
+                    // Seeded selection based on batch to keep it deterministic
+                    const selectedPassage = passages[batchNumber % passages.length];
+                    const passageQuestions = await Question.find({ 
+                        subject: "Use of English", 
+                        subSubTopic: selectedPassage 
+                    }).sort({ _id: 1 });
+
+                    // Map to plain objects safely
+                    const sanitizedQs = passageQuestions.map(q => q.toObject ? q.toObject() : q);
+                    paper.push(...sanitizedQs.slice(0, dist.qty));
+                }
+            } else {
+                // aggregate returns plain objects automatically
+                const qs = await Question.aggregate([
+                    { $match: { subject: "Use of English", subTopic: dist.topic } },
+                    { $sample: { size: dist.qty } }
+                ]);
+                paper.push(...qs);
+            }
+        } catch (e) {
+            console.error(`Error in English Section ${dist.topic}:`, e);
         }
     }
-    return paper;
+    return paper; 
 }
 
 // Deterministic Batch Pool (Seeded)
 function getBatchPool(allQuestions, batchNum, questionsPerStudent) {
+    if (!allQuestions || allQuestions.length === 0) return [];
+
     const totalAvailable = allQuestions.length;
     const poolSize = Math.min(totalAvailable, Math.floor(questionsPerStudent * 1.5));
     
@@ -1301,8 +1330,11 @@ function getBatchPool(allQuestions, batchNum, questionsPerStudent) {
         return arr;
     };
 
+    // Shuffle based on Batch Number
     const batchSpecificBank = seededShuffle([...allQuestions], batchNum * 123);
-    return batchSpecificBank.slice(0, poolSize);
+    
+    // Return the slice as plain objects
+    return batchSpecificBank.slice(0, poolSize).map(q => (q.toObject ? q.toObject() : q));
 }
 
 // Result Calculator
