@@ -1370,25 +1370,32 @@ function getBatchPool(allQuestions, batchNum, questionsPerStudent) {
 }
 
 // Result Calculator
-async function calculateScore(responses) {
-    const qIds = responses.map(r => r.questionId);
-    const questions = await Question.find({ _id: { $in: qIds } });
+async function calculateScore(responses, session) {
+    // 1. Fetch ALL questions that were served in this session, not just responses
+    const questions = await Question.find({ _id: { $in: session.questionsServed } });
     
-    const stats = {};
-    responses.forEach(res => {
-        const q = questions.find(item => item._id.toString() === res.questionId);
-        if (!q) return;
-        if (!stats[q.subject]) stats[q.subject] = { correct: 0, total: 0 };
+    // 2. Map results based on the User's Required Subject Combination
+    return session.subjectCombination.map(subName => {
+        // Filter questions belonging to this specific subject
+        const subQuestions = questions.filter(q => q.subject === subName);
         
-        stats[q.subject].total++;
-        if (res.selectedOptionKey === q.answer) stats[q.subject].correct++;
-    });
+        let correct = 0;
+        subQuestions.forEach(q => {
+            // Check if the user provided a response for this specific question
+            const userRes = responses.find(r => r.questionId.toString() === q._id.toString());
+            // Match against 'answer' or 'correctKey' depending on your Question Schema
+            if (userRes && userRes.selectedOptionKey === q.answer) {
+                correct++;
+            }
+        });
 
-    return Object.keys(stats).map(name => ({
-        subjectName: name,
-        correctCount: stats[name].correct,
-        totalQuestions: stats[name].total
-    }));
+        return {
+            subjectName: subName,
+            correctCount: correct,
+            // This ensures it shows '0 / 40' even if they didn't attempt any
+            totalQuestions: subQuestions.length || 0 
+        };
+    });
 }
 
 
