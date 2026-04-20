@@ -1238,18 +1238,21 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
 // --- 3. AUTO-SAVE & SUBMIT ---
 app.post('/api/exams/submit-exam', async (req, res) => {
     try {
-        const { examId, responses, status, totalSecondsRemaining } = req.body;
+        const { examId, responses, subjectAnalysis, status, totalSecondsRemaining } = req.body;
         
-        // 1. Update the Session (The 'Attempt')
         const session = await Exam.findById(examId);
         if (!session) return res.status(404).json({ error: "Session not found" });
 
+        // Update session fields
         session.responses = responses;
         session.status = status;
         session.totalSecondsRemaining = totalSecondsRemaining;
 
-        // 2. Handle Final Submission
-        if (status === 'submitted' || status === 'timed-out') {
+        if (subjectAnalysis) {
+            session.subjectAnalysis = subjectAnalysis; 
+        }
+        // Handle Final Submission (or Inactivity/Timeout)
+        if (status === 'submitted' || status === 'timed-out' || status === 'inactive-sync') {
             session.endTime = new Date();
             
             // Mark user allocation as taken
@@ -1258,41 +1261,60 @@ app.post('/api/exams/submit-exam', async (req, res) => {
                 { $set: { "examAllocations.$.hasTaken": true } }
             );
 
-            // 3. Perform Detailed Grading
-            // Assuming calculateScore returns data matching your ResultSchema.subjectResults
-            const subjectResults = await calculateScore(responses, session.examId);
+            // FIX: Pass the whole 'session' object to calculateScore
+            const subjectResults = await calculateScore(responses, session, subjectAnalysis);
             
+            // Update the Exam DB Session with the analysis
+            session.subjectAnalysis = subjectResults; 
+
             const totalCorrect = subjectResults.reduce((acc, curr) => acc + curr.correctCount, 0);
-            const totalQuestions = subjectResults.reduce((acc, curr) => acc + curr.totalQuestions, 0);
             
-            // Create the entry in your Result Collection
-            const finalResult = await Result.create({
-                userId: session.userId,
-                examId: session.examId,
-                examSessionId: session._id, // This links the specific attempt
-                subjectResults: subjectResults,
-                aggregateScore: subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore2 || 0), 0),
-                preciseRankingScore: subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore1 || 0), 0),
-                timeTaken: (120 * 60) - totalSecondsRemaining, // Calculate time spent
-                examDate: new Date()
-            });
-
+            // Create or Update the Result Entry (Ensures examSessionId is present)
+            const finalResult = await Result.findOneAndUpdate(
+                { examSessionId: session._id }, // Search by session link
+                {
+                    userId: session.userId,
+                    examId: session.examId,
+                    examSessionId: session._id, 
+                    subjectResults: subjectResults,
+                    // Initial scores before the runNormalization logic is triggered later
+                    aggregateScore: subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore2 || 0), 0),
+                    preciseRankingScore: subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore1 || 0), 0),
+                    timeTaken: (120 * 60) - totalSecondsRemaining,
+                    examDate: new Date()
+                },
+                { upsert: true, new: true } // Create if doesn't exist, update if it does
+            );
+          
+          // 3. Only mark the user's allocation as 'hasTaken: true' if it's a FINAL status
+    if (status !== 'inactive-sync') {
+        session.endTime = new Date();
+        await User.updateOne(
+            { _id: session.userId, "examAllocations.examId": session.examId },
+            { $set: { "examAllocations.$.hasTaken": true } }
+        );
+    }
+          
             await session.save();
+            
+            // 4. Trigger Normalization so this student's data is now in the global pool
+    runNormalization(Result, session.examId).catch(console.error);
 
-            // Return the results for the frontend modal
+            // Return clean data for the frontend modal
             return res.json({ 
                 success: true, 
                 data: { 
                     subjectResults,
                     totalScore: totalCorrect,
-                    expectedTotal: 180, // Fixed expected total for JAMB context
+                    expectedTotal: 180,
                     resultId: finalResult._id,
                     message: "Full results and scripts will be sent to your registered email later."
                 } 
             });
         }
 
-        // Handle Auto-save (just save the session, no result record yet)
+        // --- Auto-save logic ---
+        // Just save the progress, don't create a Result entry yet
         await session.save();
         res.json({ success: true });
 
@@ -1301,6 +1323,7 @@ app.post('/api/exams/submit-exam', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 async function getEnglishPaper(examConfigId, batchNumber) {
     const paper = [];
@@ -1370,30 +1393,46 @@ function getBatchPool(allQuestions, batchNum, questionsPerStudent) {
 }
 
 // Result Calculator
-async function calculateScore(responses, session) {
-    // 1. Fetch ALL questions that were served in this session, not just responses
+async function calculateScore(responses, session, subjectAnalysis = []) {
     const questions = await Question.find({ _id: { $in: session.questionsServed } });
     
-    // 2. Map results based on the User's Required Subject Combination
     return session.subjectCombination.map(subName => {
-        // Filter questions belonging to this specific subject
         const subQuestions = questions.filter(q => q.subject === subName);
-        
-        let correct = 0;
+        let correctCount = 0;
+        let sumCorrectWeight = 0;
+        let totalWeight = 0;
+
         subQuestions.forEach(q => {
-            // Check if the user provided a response for this specific question
+            const weight = q.weight || 1; 
+            totalWeight += weight;
+
             const userRes = responses.find(r => r.questionId.toString() === q._id.toString());
-            // Match against 'answer' or 'correctKey' depending on your Question Schema
             if (userRes && userRes.selectedOptionKey === q.answer) {
-                correct++;
+                correctCount++;
+                sumCorrectWeight += weight;
             }
         });
 
+        // Match time from the frontend payload
+        const timeData = subjectAnalysis.find(a => a.subjectName === subName);
+        const secondsSpent = timeData ? timeData.secondsSpent : 0;
+
+        const totalExpected = subQuestions.length || 40; 
+        const raw1 = (correctCount / totalExpected) * 100;
+        const weighted1 = totalWeight > 0 ? (sumCorrectWeight / totalWeight) * 100 : 0;
+
         return {
             subjectName: subName,
-            correctCount: correct,
-            // This ensures it shows '0 / 40' even if they didn't attempt any
-            totalQuestions: subQuestions.length || 0 
+            correctCount: correctCount,
+            totalQuestions: totalExpected,
+            rawScore1: raw1,
+            rawScore2: Math.round(raw1),
+            weightedScore1: weighted1,
+            weightedScore2: Math.round(weighted1),
+            normalizedScore1: weighted1, 
+            normalizedScore2: Math.round(weighted1),
+            // This now populates the Exam DB correctly
+            timeSpentSeconds: secondsSpent 
         };
     });
 }
