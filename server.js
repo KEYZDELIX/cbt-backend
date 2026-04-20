@@ -1394,6 +1394,7 @@ function getBatchPool(allQuestions, batchNum, questionsPerStudent) {
 
 // Result Calculator
 async function calculateScore(responses, session, subjectAnalysis = []) {
+    // 1. Fetch questions based on what was served in this specific session
     const questions = await Question.find({ _id: { $in: session.questionsServed } });
     
     return session.subjectCombination.map(subName => {
@@ -1406,32 +1407,39 @@ async function calculateScore(responses, session, subjectAnalysis = []) {
             const weight = q.weight || 1; 
             totalWeight += weight;
 
-            const userRes = responses.find(r => r.questionId.toString() === q._id.toString());
-            if (userRes && userRes.selectedOptionKey === q.answer) {
+            // FIX: Find the user response using clean string comparison
+            const userRes = responses.find(r => String(r.questionId) === String(q._id));
+            
+            // FIX: Ensure both keys are strings before comparing (e.g., 'A' === 'A')
+            if (userRes && String(userRes.selectedOptionKey).trim() === String(q.answer).trim()) {
                 correctCount++;
                 sumCorrectWeight += weight;
             }
         });
 
-        // Match time from the frontend payload
+        // 2. FIXED DENOMINATOR LOGIC
+        // JAMB standard: English is usually 60, others are 40.
+        const isEnglish = subName.toLowerCase().includes('english');
+        const fixedTotal = isEnglish ? 60 : 40;
+
+        // Calculate percentages
+        const raw1 = (correctCount / fixedTotal) * 100;
+        const weighted1 = totalWeight > 0 ? (sumCorrectWeight / totalWeight) * 100 : 0;
+
+        // Match time from subjectAnalysis
         const timeData = subjectAnalysis.find(a => a.subjectName === subName);
         const secondsSpent = timeData ? timeData.secondsSpent : 0;
-
-        const totalExpected = subQuestions.length || 40; 
-        const raw1 = (correctCount / totalExpected) * 100;
-        const weighted1 = totalWeight > 0 ? (sumCorrectWeight / totalWeight) * 100 : 0;
 
         return {
             subjectName: subName,
             correctCount: correctCount,
-            totalQuestions: totalExpected,
+            totalQuestions: fixedTotal, // Now returns 60 or 40 consistently
             rawScore1: raw1,
             rawScore2: Math.round(raw1),
             weightedScore1: weighted1,
             weightedScore2: Math.round(weighted1),
             normalizedScore1: weighted1, 
             normalizedScore2: Math.round(weighted1),
-            // This now populates the Exam DB correctly
             timeSpentSeconds: secondsSpent 
         };
     });
