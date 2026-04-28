@@ -1,46 +1,48 @@
 const mongoose = require('mongoose');
 
 const QuestionSchema = new mongoose.Schema({
-  subject: { type: String, required: true, index: true },
+  examType: { 
+    type: String, 
+    enum: ['JAMB', 'WAEC'], 
+    default: 'JAMB', 
+    index: true 
+  },
   
-  // For English, this stores "Section A", "Section B", etc.
-  // For Math/Physics, it stores "Algebra", "Calculus", etc.
+  subject: { type: String, required: true, index: true },
   topic: { type: String, required: true, index: true },
 
-  // --- NEW FIELDS FOR STRUCTURED SUBJECTS ---
-  
-  // Stores "Comprehension Passage", "Synonyms", etc.
+  paperType: { 
+    type: String, 
+    enum: ['OBJ', 'THEORY', 'PRACTICAL'], 
+    default: 'OBJ' 
+  },
+
+  // --- NEW OPTIONAL INSTRUCTION FIELD ---
+  // Use this for: "Choose the most appropriate option..." or "Use the diagram to..."
+  instruction: { type: String, default: "" },
+
   subTopic: { type: String, default: "" }, 
-  
-  // Stores the specific Group Name or Passage Title (e.g., "Passage 1")
   subSubTopic: { type: String, default: "" }, 
-  
-  // Stores the actual story or cloze text for the group
   passage: { type: String, default: "" },
   
-  // Main Question Content
   questionText: { type: String, required: true },
-  questionImage: { type: String, default: null }, // Diagram for the question stem
+  questionImage: { type: String, default: null }, 
   
-  // Flexible Options
   options: [{
-    key: { type: String, required: true }, // "A", "B", "C", "D"
-    value: { type: String, default: "" },  // Textual answer
-    optionImage: { type: String, default: null } // Image answer (e.g., a chemical structure)
+    key: { type: String, required: true }, 
+    value: { type: String, default: "" },  
+    optionImage: { type: String, default: null } 
   }],
   
   correctOptionKey: { type: String, required: true },
   
-  // Logic & Scoring
-  weight: { 
-    type: Number, 
-    default: 1, 
-    min: 1, 
-    max: 3.0 
-  },
+  weight: { type: Number, default: 1, min: 1, max: 3.0 },
   explanation: { type: String },
-  
-  createdAt: { type: Date, default: Date.now }
+  year: { type: Number, index: true }, 
+  createdBy: { type: String, default: "SuperAdmin" }, // Name or ID of Admin
+  updatedBy: { type: String, default: null },
 },{ timestamps: true });
+
+QuestionSchema.index({ examType: 1, subject: 1 });
 
 module.exports = mongoose.model('Question', QuestionSchema);

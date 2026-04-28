@@ -220,60 +220,136 @@ app.delete('/admin/users/:id', async (req, res) => {
 });
 
 
-// 2. Add Question via Admin
+/**
+ * 1. ADD NEW QUESTION
+ * Handles creation and ensures English passages OR group instructions are synced.
+ */
 app.post('/questions', async (req, res) => {
     try {
-        const newQuestion = new Question(req.body);
+        const questionData = req.body;
+        
+        // Admin Tracking Defaults
+        if (!questionData.createdBy) questionData.createdBy = "KeyzDelix";
+
+        const newQuestion = new Question(questionData);
         await newQuestion.save();
-        // Inside your save/update route// Inside your app.post('/questions') or app.put('/questions/:id')
-const questionData = req.body;
 
-if (questionData.subject === "Use of English" && questionData.subSubTopic && questionData.passage) {
-    // This part ensures that "Passage 1" always stays identical across all questions
-    await Question.updateMany(
-        { subject: "Use of English", subSubTopic: questionData.subSubTopic },
-        { $set: { passage: questionData.passage } }
-    );
-}
+        const { examType, subject, subTopic, subSubTopic, passage, instruction } = questionData;
 
-        res.json({ success: true });
+        // --- SYNC LOGIC: PASSAGES ---
+        // If it's English and has a passage, sync all questions in that specific subSubTopic
+        if (subject.includes("English") && subSubTopic && passage) {
+            await Question.updateMany(
+                { examType, subject, subSubTopic },
+                { $set: { passage: passage } }
+            );
+        }
+
+        // --- SYNC LOGIC: INSTRUCTIONS ---
+        // Sync instructions for ANY subject based on the subTopic group
+        if (subTopic && instruction) {
+            await Question.updateMany(
+                { examType, subject, subTopic },
+                { $set: { instruction: instruction } }
+            );
+        }
+
+        res.json({ success: true, id: newQuestion._id });
     } catch (err) {
+        console.error("Add Question Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
-// GET ALL QUESTIONS (For the Manage Table)
+
+/**
+ * 2. GET ALL QUESTIONS
+ * Fetches all questions, sorted so the most recently touched are at the top.
+ */
 app.get('/questions', async (req, res) => {
     try {
-        // We sort by -1 so the newest questions appear at the top
         const questions = await Question.find().sort({ updatedAt: -1 });
         res.json(questions);
     } catch (err) {
-        res.status(500).json({ error: "Could not fetch questions" });
+        res.status(500).json({ error: "Could not fetch questions: " + err.message });
     }
 });
 
-
-// DELETE QUESTION
-app.delete('/questions/:id', async (req, res) => {
+/**
+ * 3. GET SINGLE QUESTION
+ */
+app.get('/questions/:id', async (req, res) => {
     try {
-        await Question.findByIdAndDelete(req.params.id);
-        res.json({ message: "Question deleted successfully" });
+        const question = await Question.findById(req.params.id);
+        if (!question) return res.status(404).json({ error: "Question not found" });
+        res.json(question);
     } catch (err) {
-        res.status(500).json({ error: "Failed to delete question" });
+        res.status(500).json({ error: "Fetch error" });
     }
 });
 
-// UPDATE EXISTING QUESTION
+/**
+ * 4. UPDATE EXISTING QUESTION
+ * Updates content and replicates changes to passages/instructions across the group.
+ */
 app.put('/questions/:id', async (req, res) => {
     try {
+        const questionData = req.body;
+        questionData.updatedBy = questionData.updatedBy || "KeyzDelix";
+
         const updatedQuestion = await Question.findByIdAndUpdate(
-            req.params.id, 
-            req.body, 
-            { new: true } // This returns the updated version
+            req.params.id,
+            questionData,
+            { new: true }
         );
+
+        if (!updatedQuestion) return res.status(404).json({ error: "Question not found" });
+
+        const { examType, subject, subTopic, subSubTopic, passage, instruction } = updatedQuestion;
+
+        // --- SYNC LOGIC: PASSAGES ---
+        if (subject.includes("English") && subSubTopic && passage) {
+            await Question.updateMany(
+                { 
+                    _id: { $ne: req.params.id }, // Don't update the current one again
+                    examType, 
+                    subject, 
+                    subSubTopic 
+                },
+                { $set: { passage: passage } }
+            );
+        }
+
+        // --- SYNC LOGIC: INSTRUCTIONS ---
+        // When you edit the instruction for one question in a topic, it fixes the rest
+        if (subTopic && instruction) {
+            await Question.updateMany(
+                { 
+                    _id: { $ne: req.params.id },
+                    examType, 
+                    subject, 
+                    subTopic 
+                },
+                { $set: { instruction: instruction } }
+            );
+        }
+
         res.json({ success: true, data: updatedQuestion });
     } catch (err) {
-        res.status(500).json({ error: "Update failed" });
+        console.error("Update Error:", err);
+        res.status(500).json({ error: "Update failed: " + err.message });
+    }
+});
+
+/**
+ * 5. DELETE QUESTION
+ */
+app.delete('/questions/:id', async (req, res) => {
+    try {
+        const deleted = await Question.findByIdAndDelete(req.params.id);
+        if (!deleted) return res.status(404).json({ error: "Question already deleted" });
+        res.json({ success: true, message: "Question removed" });
+    } catch (err) {
+        res.status(500).json({ error: "Delete failed" });
     }
 });
 
@@ -1445,6 +1521,18 @@ async function calculateScore(responses, session, subjectAnalysis = []) {
     });
 }
 
+async function fixOldQuestions() {
+    try {
+        // Find questions where examType is missing or null
+        const result = await Question.updateMany(
+            { examType: { $exists: false } }, 
+            { $set: { examType: "JAMB" } }
+        );
+        console.log(`✅ Migration Complete: Updated ${result.modifiedCount} old questions to JAMB.`);
+    } catch (err) {
+        console.error("❌ Migration Failed:", err);
+    }
+}
 
 
 module.exports = router;
@@ -1452,5 +1540,8 @@ module.exports = router;
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+});
+mongoose.connection.once('open', () => {
+    fixOldQuestions();
 });
 
