@@ -72,6 +72,7 @@ const UserSchema = new mongoose.Schema({
     examId: {type: mongoose.Schema.Types.ObjectId, ref: 'exam'},
     title: String,
     batchNumber: Number,
+    shuffleSeed: String,
     startTime: Date,
     endTime: Date,
     hasTaken: { type: Boolean, default: false }

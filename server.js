@@ -869,12 +869,13 @@ app.post('/api/exams/reset/:examId', async (req, res) => {
     }
 });
 
-// DISTRIBUTE batches
+// DISTRIBUTE 
 // POST: Randomly assign students to batches
+
 app.post('/api/exams/distribute-batches/:id', async (req, res) => {
     try {
         const examId = req.params.id;
-        const { clearAll } = req.body; // New: Option to reset
+        const { clearAll } = req.body;
         
         const exam = await ExamConfig.findById(examId);
         if (!exam) return res.status(404).json({ error: "Exam not found" });
@@ -882,11 +883,6 @@ app.post('/api/exams/distribute-batches/:id', async (req, res) => {
         const studentRegs = exam.assignedStudents;
         const batches = exam.batchSettings;
 
-        if (!batches || batches.length === 0) {
-            return res.status(400).json({ error: "No batches defined." });
-        }
-
-        // 1. If 'clearAll' is requested, remove all allocations for this exam first
         if (clearAll) {
             await User.updateMany(
                 { regNo: { $in: studentRegs } },
@@ -894,23 +890,38 @@ app.post('/api/exams/distribute-batches/:id', async (req, res) => {
             );
         }
 
-        // 2. Identify students who DON'T have an allocation for this exam yet
-        const users = await User.find({ regNo: { $in: studentRegs } });
-        const unassignedUsers = users.filter(u => 
+        // Identify unassigned students
+        const allUsers = await User.find({ regNo: { $in: studentRegs } });
+        const unassignedUsers = allUsers.filter(u => 
             !u.examAllocations.some(alloc => alloc.examId.toString() === examId)
         );
 
         if (unassignedUsers.length === 0) {
-            return res.json({ message: "All students are already assigned. No changes made.", count: 0 });
+            return res.json({ message: "No unassigned students found." });
         }
 
-        // 3. Shuffle ONLY the unassigned students
-        const shuffled = [...unassignedUsers].sort(() => Math.random() - 0.5);
+        // SHUFFLE: Use the exam's shuffleSeed if it exists for consistent randomization,
+        // otherwise use Math.random() for fresh distribution.
+        const shuffled = unassignedUsers.sort(() => Math.random() - 0.5);
 
-        // 4. Distribute across batches (filling batches evenly)
+        // BALANCING LOGIC: 
+        // Find current occupancy of each batch to fill the emptiest ones first
+        const occupancyMap = {};
+        batches.forEach(b => occupancyMap[b.batchNumber] = 0);
+        
+        allUsers.forEach(u => {
+            const alloc = u.examAllocations.find(a => a.examId.toString() === examId);
+            if (alloc) occupancyMap[alloc.batchNumber]++;
+        });
+
         const updatePromises = shuffled.map((user, index) => {
-            const batchIdx = index % batches.length; // Round-robin assignment
-            const b = batches[batchIdx];
+            // Find batch with the smallest count
+            const sortedBatches = [...batches].sort((a, b) => 
+                occupancyMap[a.batchNumber] - occupancyMap[b.batchNumber]
+            );
+            
+            const targetBatch = sortedBatches[0];
+            occupancyMap[targetBatch.batchNumber]++; // Update map for next iteration
 
             return User.updateOne(
                 { _id: user._id },
@@ -919,9 +930,11 @@ app.post('/api/exams/distribute-batches/:id', async (req, res) => {
                         examAllocations: {
                             examId: exam._id,
                             title: exam.title,
-                            batchNumber: b.batchNumber,
-                            startTime: new Date(b.startTime), // Use saved batch date/time
-                            endTime: new Date(b.endTime)
+                            batchNumber: targetBatch.batchNumber,
+                            startTime: targetBatch.startTime,
+                            endTime: targetBatch.endTime,
+                            // Pass the Seed DNA to the student's allocation
+                            shuffleSeed: exam.shuffleSeed 
                         } 
                     } 
                 }
@@ -929,12 +942,50 @@ app.post('/api/exams/distribute-batches/:id', async (req, res) => {
         });
 
         await Promise.all(updatePromises);
-        res.json({ 
-            message: "Distribution successful", 
-            count: shuffled.length, 
-            batches: batches.length,
-            status: clearAll ? "Fresh distribution" : "Added unassigned students only"
-        });
+        res.json({ message: `Assigned ${shuffled.length} new students.` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/exams/move-student', async (req, res) => {
+    const { regNo, examId, newBatchNumber } = req.body;
+    
+    try {
+        // Find the exam to get the correct batch timing
+        const exam = await ExamConfig.findById(examId);
+        const batchInfo = exam.batchSettings.find(b => b.batchNumber == newBatchNumber);
+
+        if (!batchInfo) return res.status(400).json({ error: "Invalid batch" });
+
+        // Update the specific allocation in the User's array
+        await User.updateOne(
+            { regNo, "examAllocations.examId": examId },
+            { 
+                $set: { 
+                    "examAllocations.$.batchNumber": parseInt(newBatchNumber),
+                    "examAllocations.$.startTime": batchInfo.startTime,
+                    "examAllocations.$.endTime": batchInfo.endTime
+                } 
+            }
+        );
+        
+        res.json({ message: "Student moved successfully" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// GET: List of students assigned to a specific exam
+app.get('/api/exams/assigned-students/:examId', async (req, res) => {
+    try {
+        const exam = await ExamConfig.findById(req.params.examId);
+        if (!exam) return res.status(404).json({ error: "Exam not found" });
+
+        // Find users whose regNo is in the exam's assigned list
+        const users = await User.find({ regNo: { $in: exam.assignedStudents } })
+                                .select('fullName regNo examAllocations');
+        res.json(users);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1521,27 +1572,11 @@ async function calculateScore(responses, session, subjectAnalysis = []) {
     });
 }
 
-async function fixOldQuestions() {
-    try {
-        // Find questions where examType is missing or null
-        const result = await Question.updateMany(
-            { examType: { $exists: false } }, 
-            { $set: { examType: "JAMB" } }
-        );
-        console.log(`✅ Migration Complete: Updated ${result.modifiedCount} old questions to JAMB.`);
-    } catch (err) {
-        console.error("❌ Migration Failed:", err);
-    }
-}
-
 
 module.exports = router;
 // Server Initialization
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-});
-mongoose.connection.once('open', () => {
-    fixOldQuestions();
 });
 
