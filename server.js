@@ -687,25 +687,57 @@ app.get('/api/subsub/check', async (req, res) => {
 // SAVE OR UPDATE EXAM CONFIGURATION
 app.post('/api/exams/save', async (req, res) => {
     const { 
-        id, title, durationMinutes, maxAttempts, shuffleType, 
-        totalQuestions, assignmentType, startDateTime, 
-        endDateTime, batchSettings, englishDist, assignedStudents 
+        id, 
+        title, 
+        subject,           // New: Track if it's Physics, Maths, etc.
+        examType,          // New: WAEC or JAMB
+        durationMinutes, 
+        timingMode,        // New: general, perQuestion, or perSet
+        setGroupSize,      // New: For "Per Set" timing
+        maxAttempts, 
+        shuffleType, 
+        selectionMode,     // New: static or random
+        shuffleSeed,       // New: The "DNA" string
+        totalQuestions, 
+        assignmentType, 
+        startDateTime, 
+        endDateTime, 
+        batchSettings, 
+        englishDist, 
+        assignedStudents 
     } = req.body;
 
+    // Package the data for MongoDB
     const data = {
-        title, durationMinutes, maxAttempts, shuffleType,
-        totalQuestions, assignmentType, startDateTime,
-        endDateTime, batchSettings, englishDist, assignedStudents
+        title,
+        subject: subject || 'General',
+        examType,
+        durationMinutes,
+        timingMode: timingMode || 'general',
+        setGroupSize: setGroupSize || 5,
+        maxAttempts,
+        shuffleType,
+        selectionMode: selectionMode || 'static',
+        shuffleSeed: shuffleSeed || null, // Store as null if empty
+        totalQuestions,
+        assignmentType,
+        startDateTime,
+        endDateTime,
+        batchSettings,
+        englishDist,
+        assignedStudents
     };
 
     try {
         if (id) {
+            // Update existing
             await ExamConfig.findByIdAndUpdate(id, data);
-            res.json({ message: "Exam Updated" });
+            res.json({ message: "Exam Engine Updated Successfully" });
         } else {
+            // Create new
             const newEx = new ExamConfig(data);
             await newEx.save();
-            res.json({ message: "Exam Created" });
+            res.json({ message: "New Exam Engine Created" });
         }
     } catch (err) {
         console.error("Database Error:", err);

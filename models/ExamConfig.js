@@ -3,6 +3,10 @@ const mongoose = require('mongoose');
 const examConfigSchema = new mongoose.Schema({
     // Add to your Schema:
     examType: { type: String, required: true, default: 'JAMB' },
+    subject: { 
+        type: String, 
+        default: 'General' // Default for JAMB or general mocks
+    },
     title: { type: String, required: true },
     // Add these to your Schema
     timingMode: { type: String, default: 'general' }, // 'general', 'perQuestion', 'perSet'
