@@ -98,71 +98,84 @@ app.get('/api/test-email-connection', async (req, res) => {
 
 // --- ADMIN ROUTES ---
 
+// --- REGISTER NEW USER ---
 app.post('/admin/register-user', async (req, res) => {
     try {
         const { 
             firstName, middleName, lastName, gender, 
             email, phone, courseOfStudy, classLevel, 
-            password, subjects 
+            password, subjects, examType, department 
         } = req.body;
 
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
-        // Auto-generate Reg Number
+        // Auto-generate Reg Number (Original Format: SST26 + 4 digits + 2 letters)
         const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         const randomLetters = chars[Math.floor(Math.random() * 26)] + chars[Math.floor(Math.random() * 26)];
         const regNumber = `SST26${Math.floor(1000 + Math.random() * 9000)}${randomLetters}`.toUpperCase();
+        
+        // Subject Logic: Add English for JAMB, empty array for WAEC
+        const finalSubjects = examType === 'JAMB' ? ['Use of English', ...subjects] : [];
 
         const newUser = new User({
             firstName, middleName, lastName, gender,
             email, phone, courseOfStudy, classLevel,
             password: hashedPassword,
-            plainPassword: password,
+            plainPassword: password, 
+            examType, 
+            department: examType === 'WAEC' ? department : 'N/A',
             regNo: regNumber,
-            subjectCombination: ['Use of English', ...subjects]
+            subjectCombination: finalSubjects
         });
 
         await newUser.save();
         
-        // Return plain password ONLY here so the Success Modal can show it once
-        res.json({ success: true, 
-        regNumber: newUser.regNo, 
-        password: password, // The plain text password from req.body
-        user: newUser
-          
+        res.json({ 
+            success: true, 
+            regNumber: newUser.regNo, 
+            password: password, 
+            user: newUser
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
+
+// --- UPDATE USER ---
 app.put('/admin/users/:id', async (req, res) => {
     try {
-        const { password, subjects, ...otherData } = req.body;
-        const updatePayload = { ...otherData };
+        const { password, subjects, examType, ...otherData } = req.body;
+        const updatePayload = { ...otherData, examType };
 
-        // 1. Only hash and update password if a new one was actually typed
+        // 1. Password update logic
         if (password && password.trim() !== "") {
             const salt = await bcrypt.genSalt(10);
             updatePayload.password = await bcrypt.hash(password, salt);
             updatePayload.plainPassword = password;
         }
         
+        // 2. Ensure RegNo exists (fallback)
         const existingUser = await User.findById(req.params.id);
         if (!existingUser.regNo) {
             const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
             const randomLetters = chars[Math.floor(Math.random() * 26)] + chars[Math.floor(Math.random() * 26)];
             updatePayload.regNo = `SST26${Math.floor(1000 + Math.random() * 9000)}${randomLetters}`.toUpperCase();
         }
-        // 2. Re-process subjects if they were changed
-        if (subjects) {
-            updatePayload.subjectCombination = ['Use of English', ...subjects];
+
+        // 3. Re-process subjects based on Exam Type
+        if (examType === 'JAMB' && subjects) {
+            updatePayload.subjectCombination = subjects.includes('Use of English') 
+                ? subjects 
+                : ['Use of English', ...subjects];
+        } else if (examType === 'WAEC') {
+            updatePayload.subjectCombination = [];
         }
 
         const updatedUser = await User.findByIdAndUpdate(
             req.params.id, 
             { $set: updatePayload }, 
-            { returnDocument: 'after' }
+            { new: true }
         );
 
         res.json({ 
@@ -176,13 +189,12 @@ app.put('/admin/users/:id', async (req, res) => {
     }
 });
 
-// Get all users for the "View Registered Users" list
+// --- GET USERS (With Pagination - Matches Load Questions) ---
 app.get('/admin/users', async (req, res) => {
     try {
-        const { search, level, gender, course } = req.query;
+        const { search, level, gender, course, page = 1, limit = 50 } = req.query;
         let query = {};
 
-        // 1. Search by Name or RegNo
         if (search) {
             query.$or = [
                 { firstName: { $regex: search, $options: 'i' } },
@@ -191,19 +203,27 @@ app.get('/admin/users', async (req, res) => {
             ];
         }
 
-        // 2. Filter by Level
         if (level) query.classLevel = level;
-
-        // 3. Filter by Gender
         if (gender) query.gender = gender;
-
-        // 4. Filter by Course
         if (course) query.courseOfStudy = { $regex: course, $options: 'i' };
 
-        const users = await User.find(query).sort({ createdAt: -1 });
-        const count = await User.countDocuments(query);
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        
+        const users = await User.find(query)
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(parseInt(limit));
 
-        res.json({ success: true, users, count });
+        const total = await User.countDocuments(query);
+
+        res.json({ 
+            success: true, 
+            users, 
+            total, // Total matching records
+            count: total, // Keeping 'count' for your existing badge logic
+            pages: Math.ceil(total / limit),
+            currentPage: parseInt(page)
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1204,7 +1224,16 @@ router.post('/publish', async (req, res) => {
     }
 });
 
-
+app.get('/api/questions/topics/:subject', async (req, res) => {
+    try {
+        const { subject } = req.params;
+        // This finds all unique topics for the selected subject
+        const topics = await Question.distinct("topic", { subject: subject });
+        res.json(topics);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch topics: " + err.message });
+    }
+});
 
 
 
@@ -1604,6 +1633,44 @@ async function calculateScore(responses, session, subjectAnalysis = []) {
     });
 }
 
+// --- AUTO-MIGRATION LOGIC (Run on Startup) ---
+const runMigration = async () => {
+    try {
+        console.log("🚀 Checking for 'SS' records to migrate to 'Set1'...");
+        
+        // Update SS1/ss1/1 to Set1 (No space)
+        const update1 = await User.updateMany(
+            { classLevel: { $in: ['SS1', 'ss1', '1', 'SS 1', 'Set 1'] } }, 
+            { $set: { classLevel: 'Set1' } }
+        );
+        
+        const update2 = await User.updateMany(
+            { classLevel: { $in: ['SS2', 'ss2', '2', 'SS 2', 'Set 2'] } }, 
+            { $set: { classLevel: 'Set2' } }
+        );
+        
+        const update3 = await User.updateMany(
+            { classLevel: { $in: ['SS3', 'ss3', '3', 'SS 3', 'Set 3'] } }, 
+            { $set: { classLevel: 'Set3' } }
+        );
+
+        const totalUpdated = update1.modifiedCount + update2.modifiedCount + update3.modifiedCount;
+
+        if (totalUpdated > 0) {
+            console.log("✅ MIGRATION COMPLETED!");
+            console.log(`📊 Updated: Set1 (${update1.modifiedCount}), Set2 (${update2.modifiedCount}), Set3 (${update3.modifiedCount})`);
+        } else {
+            console.log("ℹ️ Migration check: No old records found. Database is already using 'Set1' format.");
+        }
+    } catch (err) {
+        console.error("❌ MIGRATION ERROR:", err.message);
+    }
+};
+
+// Execute migration after DB connection is established
+mongoose.connection.once('open', () => {
+    runMigration();
+});
 
 module.exports = router;
 // Server Initialization

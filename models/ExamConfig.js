@@ -23,7 +23,7 @@ const examConfigSchema = new mongoose.Schema({
         startTime: String,
         endTime: String
     }],
-    englishDist: [{ 
+    topicDistribution: [{ 
         section: String, 
         topic: String,
         subTopic: String, 

@@ -39,21 +39,26 @@ const UserSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
-  courseOfStudy: {
-    type: String,
-    trim: true
+  examType: { 
+    type: String, 
+    enum: ['JAMB', 'WAEC'], 
+    required: true 
+  },
+  courseOfStudy: { type: String, default: 'N/A' },
+  
+  department: { 
+    type: String, 
+    default: 'N/A' // Science, Art, Commercial, or N/A
   },
 
   // Academic Profile
   classLevel: {
     type: String,
-    enum: ['SS1', 'SS2', 'SS3'],
+    enum: ['Set1', 'Set2', 'Set3'],
     required: true
   },
-  subjectCombination: {
-    type: [String],
-    validate: [arrayLimit, '{PATH} must have exactly 4 subjects']
-  },
+  subjectCombination: [String],
+
 
   // Security & Session Management
   password: { 
