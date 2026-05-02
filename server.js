@@ -1318,6 +1318,22 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
+// --- GET EXAM CONFIG FOR INSTRUCTIONS ---
+app.get('/api/exams/config/:id', async (req, res) => {
+    try {
+        const config = await ExamConfig.findById(req.params.id);
+        
+        if (!config) {
+            return res.status(404).json({ error: "Configuration not found" });
+        }
+
+        // Return the full config so the frontend can access title, instructions, etc.
+        res.json(config);
+    } catch (err) {
+        console.error("Config Fetch Error:", err);
+        res.status(500).json({ error: "Failed to load exam instructions" });
+    }
+});
 
 // --- 1. START OR RESUME EXAM ---
 app.post('/api/exams/start-exam', async (req, res) => {
