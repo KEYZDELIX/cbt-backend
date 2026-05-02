@@ -1237,6 +1237,88 @@ app.get('/api/questions/topics/:subject', async (req, res) => {
 
 
 
+
+// --- AUTHENTICATION: LOGIN API ---
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { regNumber, password } = req.body;
+        
+        // 1. Find user and normalize Reg Number
+        // Using plainPassword as per your existing schema structure
+        const user = await User.findOne({ 
+            regNo: regNumber.trim().toUpperCase(), 
+            plainPassword: password.trim() 
+        });
+
+        if (!user) {
+            return res.status(401).json({ 
+                success: false, 
+                message: "Invalid Registration Number or PIN" 
+            });
+        }
+
+        const now = new Date().getTime();
+        const gracePeriod = 30 * 60 * 1000; // 30-minute window before start
+
+        // 2. Process allocations to determine exam status
+        const processedAllocations = await Promise.all(user.examAllocations.map(async (alloc) => {
+            const a = alloc.toObject ? alloc.toObject() : alloc;
+            
+            const start = new Date(a.startTime).getTime();
+            const end = new Date(a.endTime).getTime();
+
+            let status = "scheduled";
+            let canClick = false;
+
+            // Determine visibility and clickability
+            if (a.hasTaken) {
+                status = "submitted";
+            } else if (now >= (start - gracePeriod) && now <= end) {
+                status = "active";
+                canClick = true;
+            } else if (now > end) {
+                status = "expired";
+            }
+
+            // 3. Check for an existing active session to allow Resumption
+            const existingSession = await Exam.findOne({ 
+                userId: user._id, 
+                examId: a.examId, 
+                status: 'active' 
+            });
+
+            return {
+                ...a,
+                currentStatus: status,
+                canClick: canClick,
+                resumeSessionId: existingSession ? existingSession._id : null
+            };
+        }));
+
+        // 4. Return clean User and Allocation data to Frontend
+        res.json({
+            success: true,
+            user: {
+                _id: user._id,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                regNo: user.regNo,
+                subjectCombination: user.subjectCombination,
+                batchNumber: user.batchNumber || 1 // Essential for our seeded shuffle
+            },
+            allocations: processedAllocations
+        });
+
+    } catch (err) {
+        console.error("Login Error:", err);
+        res.status(500).json({ 
+            success: false, 
+            message: "Server Error during authentication." 
+        });
+    }
+});
+
+
 // --- 1. START OR RESUME EXAM ---
 app.post('/api/exams/start-exam', async (req, res) => {
     try {
