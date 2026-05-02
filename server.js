@@ -1237,108 +1237,35 @@ app.get('/api/questions/topics/:subject', async (req, res) => {
 
 
 
-///// EXAMINATION  (INDEX.HTML) ///////////
-
-app.post('/api/auth/login', async (req, res) => {
-    try {
-        const { regNumber, password } = req.body;
-        
-        // Find user and normalize Reg Number
-        const user = await User.findOne({ 
-            regNo: regNumber.trim().toUpperCase(), 
-            plainPassword: password.trim() 
-        });
-
-        if (!user) {
-            return res.status(401).json({ message: "Invalid Registration Number or PIN" });
-        }
-
-        const now = new Date().getTime();
-        const gracePeriod = 30 * 60 * 1000; // 30-minute window before start
-
-        // Process allocations using Promise.all for database efficiency
-        const processedAllocations = await Promise.all(user.examAllocations.map(async (alloc) => {
-            const a = alloc.toObject ? alloc.toObject() : alloc;
-            
-            const start = new Date(a.startTime).getTime();
-            const end = new Date(a.endTime).getTime();
-
-            let status = "scheduled";
-            let canClick = false;
-
-            // 1. Determine Status
-            if (a.hasTaken) {
-                status = "submitted";
-            } else if (now >= (start - gracePeriod) && now <= end) {
-                status = "active";
-                canClick = true;
-            } else if (now > end) {
-                status = "expired";
-            }
-
-            // 2. Look for an existing session to resume
-            // We search for a session linked to this specific blueprint (examId)
-            const existingSession = await Exam.findOne({ 
-                userId: user._id, 
-                examId: a.examId, 
-                status: 'active' 
-            });
-
-            return {
-                ...a,
-                currentStatus: status,
-                canClick: canClick,
-                resumeSessionId: existingSession ? existingSession._id : null
-            };
-        }));
-
-        res.json({
-            success: true,
-            user: {
-                _id: user._id,
-                firstName: user.firstName,
-                lastName: user.lastName,
-                regNo: user.regNo,
-                subjectCombination: user.subjectCombination
-            },
-            allocations: processedAllocations
-        });
-
-    } catch (err) {
-        console.error("Login Error:", err);
-        res.status(500).json({ message: "Server Error during login authentication." });
-    }
-});
-
 // --- 1. START OR RESUME EXAM ---
 app.post('/api/exams/start-exam', async (req, res) => {
     try {
-        const { userId, examId } = req.body; // examId is the ExamConfig ID
+        const { userId, examId } = req.body; 
 
         if (!examId) return res.status(400).json({ error: "No Exam ID provided" });
 
-        // Search for an existing active session to resume
         let examSession = await Exam.findOne({ userId, examId: examId, status: 'active' });
 
         if (!examSession) {
             const user = await User.findById(userId);
-            if (!user) return res.status(404).json({ error: "User not found" });
+            const config = await ExamConfig.findById(examId);
+            if (!user || !config) return res.status(404).json({ error: "Context not found" });
 
-            // Check if user already finished this exam
             const allocation = user.examAllocations?.find(a => a.examId.toString() === examId.toString());
             if (allocation && allocation.hasTaken) {
                 return res.status(403).json({ error: "EXAM_ALREADY_TAKEN" });
             }
 
-            // Create NEW session
+            // Create NEW session with Config Defaults
             examSession = new Exam({
                 userId: user._id,
-                examId: examId, // Blueprint link
+                examId: examId,
                 subjectCombination: user.subjectCombination,
                 status: 'active',
                 startTime: new Date(),
+                totalSecondsRemaining: config.duration * 60,
                 responses: [],
-                subjectAnalysis: [] // Initialize for time tracking
+                subjectAnalysis: []
             });
             await examSession.save();
         }
@@ -1349,56 +1276,66 @@ app.post('/api/exams/start-exam', async (req, res) => {
     }
 });
 
-// --- 2. FETCH QUESTIONS (With Batching & English Logic) ---
-
+// --- 2. FETCH QUESTIONS (Topic Distribution & Shuffling) ---
 app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
     try {
         const session = await Exam.findById(req.params.sessionId).populate('userId');
-        if (!session) return res.status(404).json({ error: "Session not found" });
+        const config = await ExamConfig.findById(session.examId);
+        if (!session || !config) return res.status(404).json({ error: "Session or Config missing" });
 
-        // Helper to sanitize questions consistently for the frontend
         const sanitize = (q) => {
             const plain = q.toObject ? q.toObject() : q;
+            const options = plain.options || [];
+            // Handle shuffleType from Config
+            const finalOptions = config.shuffleType === 'shuffleOptions' || config.shuffleType === 'shuffleBoth' 
+                ? [...options].sort(() => 0.5 - Math.random()) 
+                : options;
+
             return {
                 ...plain,
                 questionText: plain.questionText || plain.question,
-                options: plain.options ? [...plain.options].sort(() => 0.5 - Math.random()) : []
+                options: finalOptions
             };
         };
 
-        // --- 1. RESUMPTION LOGIC ---
+        // RESUMPTION
         if (session.questionsServed && session.questionsServed.length > 0) {
             const questions = await Question.find({ _id: { $in: session.questionsServed } });
-            
             const results = session.subjectCombination.map(sub => ({
                 subject: sub,
-                // Filter and sanitize each question in the resumption list
                 questions: questions.filter(q => q.subject === sub).map(sanitize)
             }));
-            
-            // Send back totalSecondsRemaining if your Exam model tracks it
-            return res.json({
-                subjects: results,
-                totalSecondsRemaining: session.totalSecondsRemaining 
-            });
+            return res.json({ subjects: results, totalSecondsRemaining: session.totalSecondsRemaining });
         }
 
-        // --- 2. FRESH GENERATION LOGIC ---
-        const config = await ExamConfig.findById(session.examId);
-        const batchNumber = session.userId.batchNumber || 1;
+        // FRESH GENERATION
         const results = [];
         let allServedIds = [];
+        const batchNum = session.userId.batchNumber || 1;
 
         for (const sub of session.subjectCombination) {
             let finalQuestions = [];
+            // Use topicDistribution instead of englishDist
+            const dist = config.topicDistribution?.filter(d => d.subject === sub);
 
-            if (sub === "Use of English") {
-                finalQuestions = await getEnglishPaper(config._id, batchNumber);
+            if (dist && dist.length > 0) {
+                // Topic-based selection mode
+                for (const d of dist) {
+                    const topicQs = await Question.find({ subject: sub, subTopic: d.topic });
+                    const pool = getBatchPool(topicQs, batchNum, d.qty, config.shuffleSeed);
+                    finalQuestions.push(...pool.slice(0, d.qty));
+                }
             } else {
-                const qtyNeeded = 40;
+                // Default qty logic (JAMB fallback)
+                const qtyNeeded = sub.toLowerCase().includes('english') ? 60 : 40;
                 const allSubQuestions = await Question.find({ subject: sub });
-                const batchPool = getBatchPool(allSubQuestions, batchNumber, qtyNeeded);
-                finalQuestions = batchPool.sort(() => Math.random() - 0.5).slice(0, qtyNeeded);
+                const pool = getBatchPool(allSubQuestions, batchNum, qtyNeeded, config.shuffleSeed);
+                finalQuestions = pool.slice(0, qtyNeeded);
+            }
+
+            // Shuffle Questions if requested
+            if (config.shuffleType === 'shuffleQuestions' || config.shuffleType === 'shuffleBoth') {
+                finalQuestions.sort(() => Math.random() - 0.5);
             }
 
             const sanitized = finalQuestions.map(sanitize);
@@ -1406,271 +1343,152 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             allServedIds.push(...sanitized.map(q => q._id));
         }
 
-        // Lock these questions to the session
         session.questionsServed = allServedIds;
         await session.save();
 
-        // Consistent response structure
-        res.json({
-            subjects: results,
-            totalSecondsRemaining: session.totalSecondsRemaining || (120 * 60)
+        res.json({ 
+            subjects: results, 
+            totalSecondsRemaining: session.totalSecondsRemaining,
+            timerMode: config.timerMode // 'total' or 'perSubject'
         });
 
     } catch (err) {
-        console.error("Fetch Error:", err.message);
         res.status(500).json({ error: err.message });
     }
 });
 
-
-// --- 3. AUTO-SAVE & SUBMIT ---
+// --- 3. SUBMIT & SCORE ---
 app.post('/api/exams/submit-exam', async (req, res) => {
     try {
         const { examId, responses, subjectAnalysis, status, totalSecondsRemaining } = req.body;
-        
         const session = await Exam.findById(examId);
-        if (!session) return res.status(404).json({ error: "Session not found" });
+        const config = await ExamConfig.findById(session.examId);
 
-        // Update session fields
         session.responses = responses;
         session.status = status;
         session.totalSecondsRemaining = totalSecondsRemaining;
 
-        if (subjectAnalysis) {
-            session.subjectAnalysis = subjectAnalysis; 
-        }
-        // Handle Final Submission (or Inactivity/Timeout)
-        if (status === 'submitted' || status === 'timed-out' || status === 'inactive-sync') {
-            session.endTime = new Date();
+        if (status === 'submitted' || status === 'timed-out') {
+            const subjectResults = await calculateScore(responses, session, config);
             
-            // Mark user allocation as taken
+            const aggregate = subjectResults.reduce((acc, curr) => acc + curr.normalizedScore2, 0);
+            const precise = subjectResults.reduce((acc, curr) => acc + curr.normalizedScore1, 0);
+
+            const finalResult = await Result.findOneAndUpdate(
+                { examSessionId: session._id },
+                {
+                    userId: session.userId,
+                    examId: session.examId,
+                    examSessionId: session._id,
+                    subjectResults,
+                    aggregateScore: aggregate,
+                    preciseRankingScore: parseFloat(precise.toFixed(3)),
+                    timeTaken: (config.duration * 60) - totalSecondsRemaining,
+                    examType: config.examType
+                },
+                { upsert: true, new: true }
+            );
+
             await User.updateOne(
                 { _id: session.userId, "examAllocations.examId": session.examId },
                 { $set: { "examAllocations.$.hasTaken": true } }
             );
 
-            // FIX: Pass the whole 'session' object to calculateScore
-            const subjectResults = await calculateScore(responses, session, subjectAnalysis);
-            
-            // Update the Exam DB Session with the analysis
-            session.subjectAnalysis = subjectResults; 
+            if (config.examType === 'JAMB') {
+                const scoring = require('./scoring');
+                scoring.runNormalization(Result, session.examId).catch(console.error);
+            }
 
-            const totalCorrect = subjectResults.reduce((acc, curr) => acc + curr.correctCount, 0);
-            
-            // Create or Update the Result Entry (Ensures examSessionId is present)
-            const finalResult = await Result.findOneAndUpdate(
-                { examSessionId: session._id }, // Search by session link
-                {
-                    userId: session.userId,
-                    examId: session.examId,
-                    examSessionId: session._id, 
-                    subjectResults: subjectResults,
-                    // Initial scores before the runNormalization logic is triggered later
-                    aggregateScore: subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore2 || 0), 0),
-                    preciseRankingScore: subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore1 || 0), 0),
-                    timeTaken: (120 * 60) - totalSecondsRemaining,
-                    examDate: new Date()
-                },
-                { upsert: true, new: true } // Create if doesn't exist, update if it does
-            );
-          
-          // 3. Only mark the user's allocation as 'hasTaken: true' if it's a FINAL status
-    if (status !== 'inactive-sync') {
-        session.endTime = new Date();
-        await User.updateOne(
-            { _id: session.userId, "examAllocations.examId": session.examId },
-            { $set: { "examAllocations.$.hasTaken": true } }
-        );
-    }
-          
             await session.save();
-            
-            // 4. Trigger Normalization so this student's data is now in the global pool
-    runNormalization(Result, session.examId).catch(console.error);
-
-            // Return clean data for the frontend modal
-            return res.json({ 
-                success: true, 
-                data: { 
-                    subjectResults,
-                    totalScore: totalCorrect,
-                    expectedTotal: 180,
-                    resultId: finalResult._id,
-                    message: "Full results and scripts will be sent to your registered email later."
-                } 
-            });
+            return res.json({ success: true, data: finalResult });
         }
 
-        // --- Auto-save logic ---
-        // Just save the progress, don't create a Result entry yet
         await session.save();
         res.json({ success: true });
-
     } catch (err) {
-        console.error("Submission Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
 
-
-async function getEnglishPaper(examConfigId, batchNumber) {
-    const paper = [];
-    const ExamConfig = require('./models/ExamConfig'); // Ensure model is required
-    const config = await ExamConfig.findById(examConfigId);
-
-    if (!config || !config.englishDist) return [];
-
-    for (const dist of config.englishDist) {
-        try {
-            const isPassageTopic = ["Comprehension Passage", "Cloze Passage"].includes(dist.topic);
-
-            if (isPassageTopic) {
-                const passages = await Question.distinct("subSubTopic", { 
-                    subject: "Use of English", 
-                    subTopic: dist.topic 
-                });
-
-                if (passages.length > 0) {
-                    // Seeded selection based on batch to keep it deterministic
-                    const selectedPassage = passages[batchNumber % passages.length];
-                    const passageQuestions = await Question.find({ 
-                        subject: "Use of English", 
-                        subSubTopic: selectedPassage 
-                    }).sort({ _id: 1 });
-
-                    // Map to plain objects safely
-                    const sanitizedQs = passageQuestions.map(q => q.toObject ? q.toObject() : q);
-                    paper.push(...sanitizedQs.slice(0, dist.qty));
-                }
-            } else {
-                // aggregate returns plain objects automatically
-                const qs = await Question.aggregate([
-                    { $match: { subject: "Use of English", subTopic: dist.topic } },
-                    { $sample: { size: dist.qty } }
-                ]);
-                paper.push(...qs);
-            }
-        } catch (e) {
-            console.error(`Error in English Section ${dist.topic}:`, e);
-        }
+// Seeded Batch Pool Helper
+function getBatchPool(allQs, batchNum, qtyNeeded, masterSeed = 123) {
+    if (!allQs.length) return [];
+    const seed = (batchNum * masterSeed);
+    let m = allQs.length, t, i;
+    let pool = [...allQs];
+    while (m) {
+        i = Math.floor(Math.abs(Math.sin(seed + m) * m--));
+        t = pool[m]; pool[m] = pool[i]; pool[i] = t;
     }
-    return paper; 
+    return pool;
 }
 
-// Deterministic Batch Pool (Seeded)
-function getBatchPool(allQuestions, batchNum, questionsPerStudent) {
-    if (!allQuestions || allQuestions.length === 0) return [];
-
-    const totalAvailable = allQuestions.length;
-    const poolSize = Math.min(totalAvailable, Math.floor(questionsPerStudent * 1.5));
-    
-    const seededShuffle = (arr, seed) => {
-        let m = arr.length, t, i;
-        while (m) {
-            i = Math.floor(Math.abs(Math.sin(seed++) * m--));
-            t = arr[m]; arr[m] = arr[i]; arr[i] = t;
-        }
-        return arr;
-    };
-
-    // Shuffle based on Batch Number
-    const batchSpecificBank = seededShuffle([...allQuestions], batchNum * 123);
-    
-    // Return the slice as plain objects
-    return batchSpecificBank.slice(0, poolSize).map(q => (q.toObject ? q.toObject() : q));
-}
-
-// Result Calculator
-async function calculateScore(responses, session, subjectAnalysis = []) {
-    // 1. Fetch questions based on what was served in this specific session
+// Unified Result Calculator
+async function calculateScore(responses, session, config) {
     const questions = await Question.find({ _id: { $in: session.questionsServed } });
-    
+    const isWAEC = config.examType === 'WAEC';
+
     return session.subjectCombination.map(subName => {
         const subQuestions = questions.filter(q => q.subject === subName);
-        let correctCount = 0;
-        let sumCorrectWeight = 0;
-        let totalWeight = 0;
+        let correct = 0, sumCorrectWeight = 0, sumServedWeight = 0;
 
         subQuestions.forEach(q => {
-            const weight = q.weight || 1; 
-            totalWeight += weight;
-
-            // FIX: Find the user response using clean string comparison
+            const weight = q.weight || 1;
+            sumServedWeight += weight;
             const userRes = responses.find(r => String(r.questionId) === String(q._id));
-            
-            // FIX: Ensure both keys are strings before comparing (e.g., 'A' === 'A')
             if (userRes && String(userRes.selectedOptionKey).trim() === String(q.answer).trim()) {
-                correctCount++;
+                correct++;
                 sumCorrectWeight += weight;
             }
         });
 
-        // 2. FIXED DENOMINATOR LOGIC
-        // JAMB standard: English is usually 60, others are 40.
-        const isEnglish = subName.toLowerCase().includes('english');
-        const fixedTotal = isEnglish ? 60 : 40;
+        // Denominator Logic
+        let fixedTotal = 0;
+        if (config.examType === 'JAMB') {
+            fixedTotal = subName.toLowerCase().includes('english') ? 60 : 40;
+        } else {
+            const totalInDist = config.topicDistribution
+                ?.filter(d => d.subject === subName)
+                .reduce((acc, curr) => acc + curr.qty, 0);
+            fixedTotal = totalInDist || subQuestions.length;
+        }
 
-        // Calculate percentages
-        const raw1 = (correctCount / fixedTotal) * 100;
-        const weighted1 = totalWeight > 0 ? (sumCorrectWeight / totalWeight) * 100 : 0;
+        // Padding weights for missing questions
+        const missing = Math.max(0, fixedTotal - subQuestions.length);
+        const totalPossibleWeight = sumServedWeight + (missing * 1);
 
-        // Match time from subjectAnalysis
-        const timeData = subjectAnalysis.find(a => a.subjectName === subName);
-        const secondsSpent = timeData ? timeData.secondsSpent : 0;
+        const raw1 = (correct / fixedTotal) * 100;
+        const weighted1 = totalPossibleWeight > 0 ? (sumCorrectWeight / totalPossibleWeight) * 100 : 0;
 
-        return {
+        const res = {
             subjectName: subName,
-            correctCount: correctCount,
-            totalQuestions: fixedTotal, // Now returns 60 or 40 consistently
+            actualScore: correct,
+            totalQuestions: fixedTotal,
             rawScore1: raw1,
             rawScore2: Math.round(raw1),
             weightedScore1: weighted1,
             weightedScore2: Math.round(weighted1),
-            normalizedScore1: weighted1, 
-            normalizedScore2: Math.round(weighted1),
-            timeSpentSeconds: secondsSpent 
+            normalizedScore1: raw1, // Pre-normalization
+            normalizedScore2: Math.round(raw1)
         };
+
+        if (isWAEC) {
+            res.grade = getWAECGrade(res.weightedScore2);
+            res.normalizedScore1 = weighted1; // For WAEC, weight is the final score
+            res.normalizedScore2 = Math.round(weighted1);
+        }
+
+        return res;
     });
 }
 
-// --- AUTO-MIGRATION LOGIC (Run on Startup) ---
-const runMigration = async () => {
-    try {
-        console.log("🚀 Checking for 'SS' records to migrate to 'Set1'...");
-        
-        // Update SS1/ss1/1 to Set1 (No space)
-        const update1 = await User.updateMany(
-            { classLevel: { $in: ['SS1', 'ss1', '1', 'SS 1', 'Set 1'] } }, 
-            { $set: { classLevel: 'Set1' } }
-        );
-        
-        const update2 = await User.updateMany(
-            { classLevel: { $in: ['SS2', 'ss2', '2', 'SS 2', 'Set 2'] } }, 
-            { $set: { classLevel: 'Set2' } }
-        );
-        
-        const update3 = await User.updateMany(
-            { classLevel: { $in: ['SS3', 'ss3', '3', 'SS 3', 'Set 3'] } }, 
-            { $set: { classLevel: 'Set3' } }
-        );
+function getWAECGrade(s) {
+    if (s >= 75) return "A1"; if (s >= 70) return "B2"; if (s >= 65) return "B3";
+    if (s >= 60) return "C4"; if (s >= 55) return "C5"; if (s >= 50) return "C6";
+    if (s >= 45) return "D7"; if (s >= 40) return "E8"; return "F9";
+}
 
-        const totalUpdated = update1.modifiedCount + update2.modifiedCount + update3.modifiedCount;
 
-        if (totalUpdated > 0) {
-            console.log("✅ MIGRATION COMPLETED!");
-            console.log(`📊 Updated: Set1 (${update1.modifiedCount}), Set2 (${update2.modifiedCount}), Set3 (${update3.modifiedCount})`);
-        } else {
-            console.log("ℹ️ Migration check: No old records found. Database is already using 'Set1' format.");
-        }
-    } catch (err) {
-        console.error("❌ MIGRATION ERROR:", err.message);
-    }
-};
-
-// Execute migration after DB connection is established
-mongoose.connection.once('open', () => {
-    runMigration();
-});
 
 module.exports = router;
 // Server Initialization
