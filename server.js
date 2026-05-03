@@ -732,7 +732,7 @@ app.post('/api/exams/save', async (req, res) => {
         title,
         subject: subject || 'General',
         examType,
-        durationMinutes,
+        durationValue,
         timingMode: timingMode || 'general',
         setGroupSize: setGroupSize || 5,
         maxAttempts,
