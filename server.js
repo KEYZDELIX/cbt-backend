@@ -744,7 +744,7 @@ app.post('/api/exams/save', async (req, res) => {
         startDateTime,
         endDateTime,
         batchSettings,
-        englishDist,
+        topicDistribution,
         assignedStudents
     };
 
