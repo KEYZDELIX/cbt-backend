@@ -1336,10 +1336,10 @@ app.get('/api/exams/config/:id', async (req, res) => {
 });
 
 // --- 1. START OR RESUME EXAM ---
+// --- 1. START OR RESUME EXAM ---
 app.post('/api/exams/start-exam', async (req, res) => {
     try {
         const { userId, examId } = req.body; 
-
         if (!examId) return res.status(400).json({ error: "No Exam ID provided" });
 
         let examSession = await Exam.findOne({ userId, examId: examId, status: 'active' });
@@ -1347,28 +1347,29 @@ app.post('/api/exams/start-exam', async (req, res) => {
         if (!examSession) {
             const user = await User.findById(userId);
             const config = await ExamConfig.findById(examId);
-            if (!user || !config) return res.status(404).json({ error: "Context not found" });
+            if (!user || !config) return res.status(404).json({ error: "User or Config not found" });
 
             const allocation = user.examAllocations?.find(a => a.examId.toString() === examId.toString());
             if (allocation && allocation.hasTaken) {
                 return res.status(403).json({ error: "EXAM_ALREADY_TAKEN" });
             }
 
-            // Create NEW session with Config Defaults
             examSession = new Exam({
                 userId: user._id,
                 examId: examId,
                 subjectCombination: user.subjectCombination,
                 status: 'active',
                 startTime: new Date(),
-                totalSecondsRemaining: config.duration * 60,
+                // FIX: Changed config.duration to config.durationValues
+                totalSecondsRemaining: (config.durationValues || 120) * 60, 
                 responses: [],
                 subjectAnalysis: []
             });
             await examSession.save();
         }
 
-        res.json({ examId: examSession._id });
+        // Ensure the key is 'examId' to match your frontend const data = await res.json(); state.examSessionId = data.examId;
+        res.json({ examId: examSession._id }); 
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
