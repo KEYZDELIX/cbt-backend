@@ -1443,23 +1443,29 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         const batchNum = session.userId.batchNumber || 1;
 
         for (const sub of session.subjectCombination) {
-            let finalQuestions = [];
-            const dist = config.topicDistribution?.filter(d => d.subject === sub);
+    let finalQuestions = [];
+    const dist = config.topicDistribution?.filter(d => d.subject === sub);
 
-            if (dist && dist.length > 0) {
-                // Topic-based selection
-                for (const d of dist) {
-                    const topicQs = await Question.find({ subject: sub, subTopic: d.topic });
-                    const pool = getBatchPool(topicQs, batchNum, d.qty, config.shuffleSeed);
-                    finalQuestions.push(...pool.slice(0, d.qty));
-                }
-            } else if (config.examType === 'JAMB') {
-                // Standard JAMB fallback
-                const qtyNeeded = isEnglish(sub) ? 60 : 40;
-                const allSubQs = await Question.find({ subject: sub });
-                const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
-                finalQuestions = pool.slice(0, qtyNeeded);
-            }
+    // PRIORITY: If topicDistribution has entries for this subject, use it!
+    if (dist && dist.length > 0) {
+        for (const d of dist) {
+            // Find by subject + topic + subTopic (if provided)
+            const query = { subject: sub, topic: d.topic };
+            if (d.subTopic) query.subTopic = d.subTopic;
+
+            const topicQs = await Question.find(query);
+            const pool = getBatchPool(topicQs, batchNum, d.qty, config.shuffleSeed);
+            finalQuestions.push(...pool.slice(0, d.qty));
+        }
+    } 
+    // FALLBACK: Only use JAMB logic if it's explicitly a JAMB exam type
+    else if (config.examType === 'JAMB') {
+        const qtyNeeded = isEnglish(sub) ? 60 : 40;
+        const allSubQs = await Question.find({ subject: sub });
+        const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
+        finalQuestions = pool.slice(0, qtyNeeded);
+    }
+    // ... rest of shuffle and sanitize logic
 
             // Logic for shuffling the ORDER of questions
             const shouldShuffleOrder = 
