@@ -1341,51 +1341,43 @@ app.get('/api/exams/config/:id', async (req, res) => {
 app.post('/api/exams/start-exam', async (req, res) => {
     try {
         const { userId, examId } = req.body;
-        if (!examId) return res.status(400).json({ error: "No Exam ID provided" });
-
         const user = await User.findById(userId);
         const config = await ExamConfig.findById(examId);
+
         if (!user || !config) return res.status(404).json({ error: "Context not found" });
 
-        // 1. Max Attempts Check
-        // Count existing sessions that are already finished
-        const attemptCount = await Exam.countDocuments({ 
-            userId, 
-            examId, 
-            status: { $in: ['submitted', 'timed-out'] } 
-        });
-
-        const maxAllowed = config.maxAttempts || 1; 
-        if (attemptCount >= maxAllowed) {
-            return res.status(403).json({ 
-                error: `Maximum attempts (${maxAllowed}) reached for this exam.` 
-            });
+        // Max Attempt Check
+        const attemptCount = await Exam.countDocuments({ userId, examId, status: { $in: ['submitted', 'timed-out'] } });
+        if (attemptCount >= (config.maxAttempts || 1)) {
+            return res.status(403).json({ error: "Maximum attempts reached." });
         }
 
-        // 2. Resume or Create Session
-        let examSession = await Exam.findOne({ userId, examId: examId, status: 'active' });
+        let examSession = await Exam.findOne({ userId, examId, status: 'active' });
 
         if (!examSession) {
-            // DECIDE SUBJECT LIST:
             let subjectsToLoad = [];
+            
+            // LOGIC SPLIT: JAMB vs WAEC/Internal
             if (config.examType === 'JAMB') {
-                // For JAMB, use the specific combination chosen by the student
-                subjectsToLoad = user.subjectCombination;
+                subjectsToLoad = user.subjectCombination; 
             } else {
-                // For WAEC/Internal, use unique subjects defined in the topicDistribution
+                // Fetch unique subjects from the topicDistribution schema
+                // This ensures the engine looks for 'Mathematics' if that's what is in the config
                 subjectsToLoad = [...new Set(config.topicDistribution.map(d => d.subject))];
             }
 
+            if (subjectsToLoad.length === 0) {
+                return res.status(400).json({ error: "No subjects defined in Exam Config." });
+            }
+
             examSession = new Exam({
-                userId: user._id,
-                examId: examId,
+                userId,
+                examId,
                 subjectCombination: subjectsToLoad,
                 status: 'active',
                 startTime: new Date(),
-                // Use the new durationValues field
                 totalSecondsRemaining: (config.durationValues || 120) * 60,
-                responses: [],
-                subjectAnalysis: []
+                responses: []
             });
             await examSession.save();
         }
