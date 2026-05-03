@@ -1304,6 +1304,7 @@ app.post('/api/auth/login', async (req, res) => {
                 lastName: user.lastName,
                 regNo: user.regNo,
                 subjectCombination: user.subjectCombination,
+                subject: user.subject,
                 batchNumber: user.batchNumber || 1 // Essential for our seeded shuffle
             },
             allocations: processedAllocations
@@ -1339,42 +1340,63 @@ app.get('/api/exams/config/:id', async (req, res) => {
 // --- 1. START OR RESUME EXAM ---
 app.post('/api/exams/start-exam', async (req, res) => {
     try {
-        const { userId, examId } = req.body; 
+        const { userId, examId } = req.body;
         if (!examId) return res.status(400).json({ error: "No Exam ID provided" });
 
+        const user = await User.findById(userId);
+        const config = await ExamConfig.findById(examId);
+        if (!user || !config) return res.status(404).json({ error: "Context not found" });
+
+        // 1. Max Attempts Check
+        // Count existing sessions that are already finished
+        const attemptCount = await Exam.countDocuments({ 
+            userId, 
+            examId, 
+            status: { $in: ['submitted', 'timed-out'] } 
+        });
+
+        const maxAllowed = config.maxAttempts || 1; 
+        if (attemptCount >= maxAllowed) {
+            return res.status(403).json({ 
+                error: `Maximum attempts (${maxAllowed}) reached for this exam.` 
+            });
+        }
+
+        // 2. Resume or Create Session
         let examSession = await Exam.findOne({ userId, examId: examId, status: 'active' });
 
         if (!examSession) {
-            const user = await User.findById(userId);
-            const config = await ExamConfig.findById(examId);
-            if (!user || !config) return res.status(404).json({ error: "User or Config not found" });
-
-            const allocation = user.examAllocations?.find(a => a.examId.toString() === examId.toString());
-            if (allocation && allocation.hasTaken) {
-                return res.status(403).json({ error: "EXAM_ALREADY_TAKEN" });
+            // DECIDE SUBJECT LIST:
+            let subjectsToLoad = [];
+            if (config.examType === 'JAMB') {
+                // For JAMB, use the specific combination chosen by the student
+                subjectsToLoad = user.subjectCombination;
+            } else {
+                // For WAEC/Internal, use unique subjects defined in the topicDistribution
+                subjectsToLoad = [...new Set(config.topicDistribution.map(d => d.subject))];
             }
 
             examSession = new Exam({
                 userId: user._id,
                 examId: examId,
-                subjectCombination: user.subjectCombination,
+                subjectCombination: subjectsToLoad,
                 status: 'active',
                 startTime: new Date(),
-                // FIX: Changed config.duration to config.durationValues
-                totalSecondsRemaining: (config.durationValues || 120) * 60, 
+                // Use the new durationValues field
+                totalSecondsRemaining: (config.durationValues || 120) * 60,
                 responses: [],
                 subjectAnalysis: []
             });
             await examSession.save();
         }
 
-        // Ensure the key is 'examId' to match your frontend const data = await res.json(); state.examSessionId = data.examId;
-        res.json({ examId: examSession._id }); 
+        res.json({ examId: examSession._id });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
+// --- 2. FETCH QUESTIONS (Topic Distribution & Shuffling) ---
 // --- 2. FETCH QUESTIONS (Topic Distribution & Shuffling) ---
 app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
     try {
@@ -1382,27 +1404,35 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         const config = await ExamConfig.findById(session.examId);
         if (!session || !config) return res.status(404).json({ error: "Session or Config missing" });
 
-        const sanitize = (q) => {
+        const isEnglish = (sub) => sub.toLowerCase().includes('english');
+
+        // Helper to shuffle options and format the question object
+        const sanitize = (q, subject) => {
             const plain = q.toObject ? q.toObject() : q;
-            const options = plain.options || [];
-            // Handle shuffleType from Config
-            const finalOptions = config.shuffleType === 'shuffleOptions' || config.shuffleType === 'shuffleBoth' 
-                ? [...options].sort(() => 0.5 - Math.random()) 
-                : options;
+            let options = plain.options || [];
+            
+            // Logic for shuffling options
+            const shouldShuffleOptions = 
+                config.shuffleType === 'both' || 
+                (config.shuffleType === 'smart' && !isEnglish(subject));
+
+            if (shouldShuffleOptions && options.length > 0) {
+                options = [...options].sort(() => 0.5 - Math.random());
+            }
 
             return {
                 ...plain,
                 questionText: plain.questionText || plain.question,
-                options: finalOptions
+                options
             };
         };
 
-        // RESUMPTION
+        // RESUMPTION: If questions are already assigned to this session
         if (session.questionsServed && session.questionsServed.length > 0) {
             const questions = await Question.find({ _id: { $in: session.questionsServed } });
             const results = session.subjectCombination.map(sub => ({
                 subject: sub,
-                questions: questions.filter(q => q.subject === sub).map(sanitize)
+                questions: questions.filter(q => q.subject === sub).map(q => sanitize(q, sub))
             }));
             return res.json({ subjects: results, totalSecondsRemaining: session.totalSecondsRemaining });
         }
@@ -1414,30 +1444,33 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
 
         for (const sub of session.subjectCombination) {
             let finalQuestions = [];
-            // Use topicDistribution instead of englishDist
             const dist = config.topicDistribution?.filter(d => d.subject === sub);
 
             if (dist && dist.length > 0) {
-                // Topic-based selection mode
+                // Topic-based selection
                 for (const d of dist) {
                     const topicQs = await Question.find({ subject: sub, subTopic: d.topic });
                     const pool = getBatchPool(topicQs, batchNum, d.qty, config.shuffleSeed);
                     finalQuestions.push(...pool.slice(0, d.qty));
                 }
-            } else {
-                // Default qty logic (JAMB fallback)
-                const qtyNeeded = sub.toLowerCase().includes('english') ? 60 : 40;
-                const allSubQuestions = await Question.find({ subject: sub });
-                const pool = getBatchPool(allSubQuestions, batchNum, qtyNeeded, config.shuffleSeed);
+            } else if (config.examType === 'JAMB') {
+                // Standard JAMB fallback
+                const qtyNeeded = isEnglish(sub) ? 60 : 40;
+                const allSubQs = await Question.find({ subject: sub });
+                const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
                 finalQuestions = pool.slice(0, qtyNeeded);
             }
 
-            // Shuffle Questions if requested
-            if (config.shuffleType === 'shuffleQuestions' || config.shuffleType === 'shuffleBoth') {
-                finalQuestions.sort(() => Math.random() - 0.5);
-            }
+            // Logic for shuffling the ORDER of questions
+            const shouldShuffleOrder = 
+                config.shuffleType === 'both' || 
+                (config.shuffleType === 'smart' && !isEnglish(sub));
 
-            const sanitized = finalQuestions.map(sanitize);
+            if (shouldShuffleOrder) {
+                finalQuestions.sort(() => Math.random() - 0.5);
+            } 
+
+            const sanitized = finalQuestions.map(q => sanitize(q, sub));
             results.push({ subject: sub, questions: sanitized });
             allServedIds.push(...sanitized.map(q => q._id));
         }
@@ -1448,14 +1481,13 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         res.json({ 
             subjects: results, 
             totalSecondsRemaining: session.totalSecondsRemaining,
-            timerMode: config.timerMode // 'total' or 'perSubject'
+            timerMode: config.timerMode 
         });
 
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
-
 // --- 3. SUBMIT & SCORE ---
 app.post('/api/exams/submit-exam', async (req, res) => {
     try {
