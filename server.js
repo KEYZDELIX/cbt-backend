@@ -711,7 +711,7 @@ app.post('/api/exams/save', async (req, res) => {
         title, 
         subject,           // New: Track if it's Physics, Maths, etc.
         examType,          // New: WAEC or JAMB
-        durationMinutes, 
+        durationValue, 
         timingMode,        // New: general, perQuestion, or perSet
         setGroupSize,      // New: For "Per Set" timing
         maxAttempts, 
@@ -723,7 +723,7 @@ app.post('/api/exams/save', async (req, res) => {
         startDateTime, 
         endDateTime, 
         batchSettings, 
-        englishDist, 
+        topicDistribution, 
         assignedStudents 
     } = req.body;
 
