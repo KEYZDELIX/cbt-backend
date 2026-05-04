@@ -1408,11 +1408,8 @@ app.post('/api/exams/start-exam', async (req, res) => {
 
         // Max Attempt Check
         const attemptCount = await Exam.countDocuments({ 
-            userId, 
-            examId, 
-            status: { $in: ['submitted', 'timed-out'] } 
+            userId, examId, status: { $in: ['submitted', 'timed-out'] } 
         });
-        
         if (attemptCount >= (config.maxAttempts || 1)) {
             return res.status(403).json({ error: "Maximum attempts reached." });
         }
@@ -1422,24 +1419,34 @@ app.post('/api/exams/start-exam', async (req, res) => {
         if (!examSession) {
             let subjectsToLoad = [];
             
+            /**
+             * SWITCH: examType
+             * JAMB -> Uses multi-subject combination from User profile.
+             * WAEC/Internal -> Uses the specific subject defined in Config.
+             */
             if (config.examType === 'JAMB') {
                 subjectsToLoad = user.subjectCombination || []; 
             } else {
-                // BUG FIX: Filter out any null or undefined values from the distribution
-                subjectsToLoad = [...new Set(config.topicDistribution
-                    .map(d => d.subject)
-                    .filter(s => s != null && s !== "") 
-                )];
+                // If it's a specific exam like WAEC Physics, use the config's subject
+                // Fallback to user combination only if config.subject is missing
+                const targetSubject = (config.subject && config.subject !== 'General') 
+                    ? config.subject 
+                    : null;
+
+                subjectsToLoad = targetSubject ? [targetSubject] : (user.subjectCombination || []);
             }
 
+            // Final safety filter for nulls/empty strings
+            subjectsToLoad = subjectsToLoad.filter(s => s != null && s !== "");
+
             if (subjectsToLoad.length === 0) {
-                return res.status(400).json({ error: "No valid subjects defined in Exam Config." });
+                return res.status(400).json({ error: "No valid subjects could be determined for this exam." });
             }
 
             examSession = new Exam({
                 userId,
                 examId,
-                subjectCombination: subjectsToLoad, // Now guaranteed to be clean strings
+                subjectCombination: subjectsToLoad,
                 status: 'active',
                 startTime: new Date(),
                 totalSecondsRemaining: (config.durationValues || 120) * 60,
@@ -1460,10 +1467,10 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
     try {
         const session = await Exam.findById(req.params.sessionId).populate('userId');
         const config = await ExamConfig.findById(session.examId);
-        
-        if (!session || !config) return res.status(404).json({ error: "Session or Config missing" });
+        if (!session || !config) return res.status(404).json({ error: "Session missing" });
 
         const isEnglish = (sub) => sub && sub.toLowerCase().includes('english');
+        const batchNum = session.userId.batchNumber || 1;
 
         const sanitize = (q, subject) => {
             const plain = q.toObject ? q.toObject() : q;
@@ -1479,67 +1486,55 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             };
         };
 
-        // RESUMPTION LOGIC
+        // --- RESUMPTION ---
         if (session.questionsServed && session.questionsServed.length > 0) {
             const questions = await Question.find({ _id: { $in: session.questionsServed } });
             const results = session.subjectCombination.map(sub => ({
                 subject: sub,
                 questions: questions.filter(q => q.subject === sub).map(q => sanitize(q, sub))
             }));
-            return res.json({ 
-                subjects: results, 
-                totalSecondsRemaining: session.totalSecondsRemaining,
-                timerMode: config.timerMode 
-            });
+            return res.json({ subjects: results, totalSecondsRemaining: session.totalSecondsRemaining, timerMode: config.timerMode });
         }
 
-        // FRESH GENERATION
+        // --- FRESH GENERATION ---
         const results = [];
         let allServedIds = [];
-        const batchNum = session.userId.batchNumber || 1;
 
         for (const sub of session.subjectCombination) {
-            if (!sub) continue; // Skip if subject name is missing
-
             let finalQuestions = [];
             const dist = config.topicDistribution?.filter(d => d.subject === sub);
-
-            // CRITICAL: We must filter by the specific examType from the config
+            
+            // This ensures we fetch 'WAEC' tagged questions for WAEC exams
             const baseQuery = { subject: sub, examType: config.examType };
 
+            // 1. Check if Topic Distribution is set
             if (dist && dist.length > 0) {
                 for (const d of dist) {
-                    const query = { 
-                        ...baseQuery,
-                        topic: d.topic.trim() 
-                    };
-                    if (d.subTopic && d.subTopic.trim() !== "") {
-                        query.subTopic = d.subTopic.trim();
-                    }
+                    const query = { ...baseQuery, topic: d.topic.trim() };
+                    if (d.subTopic) query.subTopic = d.subTopic.trim();
 
                     let topicQs = await Question.find(query);
-
-                    // FALLBACK: If specific topic has no WAEC questions, grab general WAEC questions for this subject
+                    
+                    // Fallback to general pool of the SAME examType if topic search fails
                     if (topicQs.length === 0) {
-                        topicQs = await Question.find(baseQuery).limit(parseInt(d.qty) || 5);
+                        topicQs = await Question.find(baseQuery).limit(parseInt(d.qty));
                     }
-
+                    
                     const pool = getBatchPool(topicQs, batchNum, parseInt(d.qty), config.shuffleSeed);
                     finalQuestions.push(...pool.slice(0, parseInt(d.qty)));
                 }
             } 
-            else if (config.examType === 'JAMB') {
+            // 2. Fallback: If no distribution, use examType general rules
+            else {
                 const qtyNeeded = isEnglish(sub) ? 60 : 40;
                 const allSubQs = await Question.find(baseQuery);
                 const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
                 finalQuestions = pool.slice(0, qtyNeeded);
             }
 
-            // Shuffle Question Order
+            // Shuffle and Sanitize
             const shouldShuffleOrder = config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isEnglish(sub));
-            if (shouldShuffleOrder) {
-                finalQuestions.sort(() => Math.random() - 0.5);
-            } 
+            if (shouldShuffleOrder) finalQuestions.sort(() => Math.random() - 0.5);
 
             const sanitized = finalQuestions.map(q => sanitize(q, sub));
             results.push({ subject: sub, questions: sanitized });
@@ -1551,15 +1546,15 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
 
         res.json({ 
             subjects: results, 
-            totalSecondsRemaining: session.totalSecondsRemaining,
+            totalSecondsRemaining: session.totalSecondsRemaining, 
             timerMode: config.timerMode 
         });
 
     } catch (err) {
-        console.error("[SERVER ERROR]:", err);
         res.status(500).json({ error: err.message });
     }
 });
+
 
 
 // --- 3. SUBMIT & SCORE ---
