@@ -127,7 +127,7 @@ mongoose.connect(process.env.MONGO_URI)
     console.log('🔥 MongoDB connected');
 
     // Runs the copy logic as soon as the DB is ready
-    await runOneTimeMigration(); 
+    //await runOneTimeMigration(); 
 
     // Once migration is done, start the server
     app.listen(PORT, () => {
@@ -1396,7 +1396,7 @@ app.get('/api/exams/config/:id', async (req, res) => {
     }
 });
 
-// --- 1. START OR RESUME EXAM ---
+
 // --- 1. START OR RESUME EXAM ---
 app.post('/api/exams/start-exam', async (req, res) => {
     try {
@@ -1407,7 +1407,12 @@ app.post('/api/exams/start-exam', async (req, res) => {
         if (!user || !config) return res.status(404).json({ error: "Context not found" });
 
         // Max Attempt Check
-        const attemptCount = await Exam.countDocuments({ userId, examId, status: { $in: ['submitted', 'timed-out'] } });
+        const attemptCount = await Exam.countDocuments({ 
+            userId, 
+            examId, 
+            status: { $in: ['submitted', 'timed-out'] } 
+        });
+        
         if (attemptCount >= (config.maxAttempts || 1)) {
             return res.status(403).json({ error: "Maximum attempts reached." });
         }
@@ -1417,23 +1422,24 @@ app.post('/api/exams/start-exam', async (req, res) => {
         if (!examSession) {
             let subjectsToLoad = [];
             
-            // LOGIC SPLIT: JAMB vs WAEC/Internal
             if (config.examType === 'JAMB') {
-                subjectsToLoad = user.subjectCombination; 
+                subjectsToLoad = user.subjectCombination || []; 
             } else {
-                // Fetch unique subjects from the topicDistribution schema
-                // This ensures the engine looks for 'Mathematics' if that's what is in the config
-                subjectsToLoad = [...new Set(config.topicDistribution.map(d => d.subject))];
+                // BUG FIX: Filter out any null or undefined values from the distribution
+                subjectsToLoad = [...new Set(config.topicDistribution
+                    .map(d => d.subject)
+                    .filter(s => s != null && s !== "") 
+                )];
             }
 
             if (subjectsToLoad.length === 0) {
-                return res.status(400).json({ error: "No subjects defined in Exam Config." });
+                return res.status(400).json({ error: "No valid subjects defined in Exam Config." });
             }
 
             examSession = new Exam({
                 userId,
                 examId,
-                subjectCombination: subjectsToLoad,
+                subjectCombination: subjectsToLoad, // Now guaranteed to be clean strings
                 status: 'active',
                 startTime: new Date(),
                 totalSecondsRemaining: (config.durationValues || 120) * 60,
@@ -1449,14 +1455,15 @@ app.post('/api/exams/start-exam', async (req, res) => {
 });
 
 
-// --- 2. FETCH QUESTIONS (Updated with Topic Logic & Debugging) ---
+// --- 2. FETCH QUESTIONS ---
 app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
     try {
         const session = await Exam.findById(req.params.sessionId).populate('userId');
         const config = await ExamConfig.findById(session.examId);
+        
         if (!session || !config) return res.status(404).json({ error: "Session or Config missing" });
 
-        const isEnglish = (sub) => sub.toLowerCase().includes('english');
+        const isEnglish = (sub) => sub && sub.toLowerCase().includes('english');
 
         const sanitize = (q, subject) => {
             const plain = q.toObject ? q.toObject() : q;
@@ -1492,15 +1499,18 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         const batchNum = session.userId.batchNumber || 1;
 
         for (const sub of session.subjectCombination) {
+            if (!sub) continue; // Skip if subject name is missing
+
             let finalQuestions = [];
             const dist = config.topicDistribution?.filter(d => d.subject === sub);
 
+            // CRITICAL: We must filter by the specific examType from the config
+            const baseQuery = { subject: sub, examType: config.examType };
+
             if (dist && dist.length > 0) {
-                console.log(`[DEBUG]: Processing distribution for ${sub}`);
                 for (const d of dist) {
-                    // Smart Query: Trim spaces and handle optional subTopics
                     const query = { 
-                        subject: sub, 
+                        ...baseQuery,
                         topic: d.topic.trim() 
                     };
                     if (d.subTopic && d.subTopic.trim() !== "") {
@@ -1508,13 +1518,10 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
                     }
 
                     let topicQs = await Question.find(query);
-                    console.log(`[DEBUG]: Found ${topicQs.length} questions for topic: ${d.topic}`);
 
-                    // FALLBACK: If no questions match the specific topic/subtopic, 
-                    // grab any questions from that subject so the UI doesn't break.
+                    // FALLBACK: If specific topic has no WAEC questions, grab general WAEC questions for this subject
                     if (topicQs.length === 0) {
-                        console.warn(`[DEBUG]: Fallback triggered for ${sub} - ${d.topic}`);
-                        topicQs = await Question.find({ subject: sub }).limit(parseInt(d.qty));
+                        topicQs = await Question.find(baseQuery).limit(parseInt(d.qty) || 5);
                     }
 
                     const pool = getBatchPool(topicQs, batchNum, parseInt(d.qty), config.shuffleSeed);
@@ -1523,7 +1530,7 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             } 
             else if (config.examType === 'JAMB') {
                 const qtyNeeded = isEnglish(sub) ? 60 : 40;
-                const allSubQs = await Question.find({ subject: sub });
+                const allSubQs = await Question.find(baseQuery);
                 const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
                 finalQuestions = pool.slice(0, qtyNeeded);
             }
@@ -1553,6 +1560,8 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+
 // --- 3. SUBMIT & SCORE ---
 app.post('/api/exams/submit-exam', async (req, res) => {
     try {
