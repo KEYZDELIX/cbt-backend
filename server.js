@@ -73,11 +73,71 @@ const { runNormalization } = require('./utils/scoring');
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+const PORT = process.env.PORT || 5000;
+
+
+const runOneTimeMigration = async () => {
+    try {
+        console.log("[MIGRATION]: Checking for Physics WAEC data...");
+
+        // Safety: Only duplicate if WAEC Physics questions don't exist yet
+        const existingWaec = await Question.countDocuments({ 
+            subject: "Physics", 
+            examType: "WAEC" 
+        });
+
+        if (existingWaec > 0) {
+            console.log(`[MIGRATION]: Skipping. ${existingWaec} WAEC questions already found.`);
+            return;
+        }
+
+        // Find JAMB sources
+        const jambQuestions = await Question.find({ 
+            subject: "Physics", 
+            examType: "JAMB" 
+        }).lean();
+
+        if (jambQuestions.length === 0) {
+            console.log("[MIGRATION]: No JAMB Physics questions found to copy.");
+            return;
+        }
+
+        // Create copies with new IDs and WAEC tag
+        const waecCopies = jambQuestions.map(q => {
+            const newDoc = { ...q };
+            delete newDoc._id; 
+            newDoc.examType = "WAEC";
+            return newDoc;
+        });
+
+        await Question.insertMany(waecCopies);
+        console.log(`[MIGRATION SUCCESS]: Duplicated ${waecCopies.length} questions to WAEC.`);
+    } catch (err) {
+        console.error("[MIGRATION ERROR]:", err);
+    }
+};
+
+
 
 // MongoDB Connection
+// ... [Place the runOneTimeMigration function definition above here] ...
+
 mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('🔥 MongoDB connected'))	
-  .catch(err => console.error('❌ Connection error:', err));
+  .then(async () => {
+    console.log('🔥 MongoDB connected');
+
+    // Runs the copy logic as soon as the DB is ready
+    await runOneTimeMigration(); 
+
+    // Once migration is done, start the server
+    app.listen(PORT, () => {
+      console.log(`🚀 Server is running on port ${PORT}`);
+    });
+  })	
+  .catch(err => {
+    console.error('❌ Connection error:', err);
+    process.exit(1); // Exit if DB connection fails
+  });
   
   // GET: Check if the mailer is alive
 app.get('/api/test-email-connection', async (req, res) => {
@@ -1388,8 +1448,8 @@ app.post('/api/exams/start-exam', async (req, res) => {
     }
 });
 
-// --- 2. FETCH QUESTIONS (Topic Distribution & Shuffling) ---
-// --- 2. FETCH QUESTIONS (Topic Distribution & Shuffling) ---
+
+// --- 2. FETCH QUESTIONS (Updated with Topic Logic & Debugging) ---
 app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
     try {
         const session = await Exam.findById(req.params.sessionId).populate('userId');
@@ -1398,20 +1458,13 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
 
         const isEnglish = (sub) => sub.toLowerCase().includes('english');
 
-        // Helper to shuffle options and format the question object
         const sanitize = (q, subject) => {
             const plain = q.toObject ? q.toObject() : q;
             let options = plain.options || [];
-            
-            // Logic for shuffling options
-            const shouldShuffleOptions = 
-                config.shuffleType === 'both' || 
-                (config.shuffleType === 'smart' && !isEnglish(subject));
-
+            const shouldShuffleOptions = config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isEnglish(subject));
             if (shouldShuffleOptions && options.length > 0) {
                 options = [...options].sort(() => 0.5 - Math.random());
             }
-
             return {
                 ...plain,
                 questionText: plain.questionText || plain.question,
@@ -1419,14 +1472,18 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             };
         };
 
-        // RESUMPTION: If questions are already assigned to this session
+        // RESUMPTION LOGIC
         if (session.questionsServed && session.questionsServed.length > 0) {
             const questions = await Question.find({ _id: { $in: session.questionsServed } });
             const results = session.subjectCombination.map(sub => ({
                 subject: sub,
                 questions: questions.filter(q => q.subject === sub).map(q => sanitize(q, sub))
             }));
-            return res.json({ subjects: results, totalSecondsRemaining: session.totalSecondsRemaining });
+            return res.json({ 
+                subjects: results, 
+                totalSecondsRemaining: session.totalSecondsRemaining,
+                timerMode: config.timerMode 
+            });
         }
 
         // FRESH GENERATION
@@ -1435,35 +1492,44 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         const batchNum = session.userId.batchNumber || 1;
 
         for (const sub of session.subjectCombination) {
-    let finalQuestions = [];
-    const dist = config.topicDistribution?.filter(d => d.subject === sub);
+            let finalQuestions = [];
+            const dist = config.topicDistribution?.filter(d => d.subject === sub);
 
-    // PRIORITY: If topicDistribution has entries for this subject, use it!
-    if (dist && dist.length > 0) {
-        for (const d of dist) {
-            // Find by subject + topic + subTopic (if provided)
-            const query = { subject: sub, topic: d.topic };
-            if (d.subTopic) query.subTopic = d.subTopic;
+            if (dist && dist.length > 0) {
+                console.log(`[DEBUG]: Processing distribution for ${sub}`);
+                for (const d of dist) {
+                    // Smart Query: Trim spaces and handle optional subTopics
+                    const query = { 
+                        subject: sub, 
+                        topic: d.topic.trim() 
+                    };
+                    if (d.subTopic && d.subTopic.trim() !== "") {
+                        query.subTopic = d.subTopic.trim();
+                    }
 
-            const topicQs = await Question.find(query);
-            const pool = getBatchPool(topicQs, batchNum, d.qty, config.shuffleSeed);
-            finalQuestions.push(...pool.slice(0, d.qty));
-        }
-    } 
-    // FALLBACK: Only use JAMB logic if it's explicitly a JAMB exam type
-    else if (config.examType === 'JAMB') {
-        const qtyNeeded = isEnglish(sub) ? 60 : 40;
-        const allSubQs = await Question.find({ subject: sub });
-        const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
-        finalQuestions = pool.slice(0, qtyNeeded);
-    }
-    // ... rest of shuffle and sanitize logic
+                    let topicQs = await Question.find(query);
+                    console.log(`[DEBUG]: Found ${topicQs.length} questions for topic: ${d.topic}`);
 
-            // Logic for shuffling the ORDER of questions
-            const shouldShuffleOrder = 
-                config.shuffleType === 'both' || 
-                (config.shuffleType === 'smart' && !isEnglish(sub));
+                    // FALLBACK: If no questions match the specific topic/subtopic, 
+                    // grab any questions from that subject so the UI doesn't break.
+                    if (topicQs.length === 0) {
+                        console.warn(`[DEBUG]: Fallback triggered for ${sub} - ${d.topic}`);
+                        topicQs = await Question.find({ subject: sub }).limit(parseInt(d.qty));
+                    }
 
+                    const pool = getBatchPool(topicQs, batchNum, parseInt(d.qty), config.shuffleSeed);
+                    finalQuestions.push(...pool.slice(0, parseInt(d.qty)));
+                }
+            } 
+            else if (config.examType === 'JAMB') {
+                const qtyNeeded = isEnglish(sub) ? 60 : 40;
+                const allSubQs = await Question.find({ subject: sub });
+                const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
+                finalQuestions = pool.slice(0, qtyNeeded);
+            }
+
+            // Shuffle Question Order
+            const shouldShuffleOrder = config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isEnglish(sub));
             if (shouldShuffleOrder) {
                 finalQuestions.sort(() => Math.random() - 0.5);
             } 
@@ -1483,6 +1549,7 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         });
 
     } catch (err) {
+        console.error("[SERVER ERROR]:", err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -1619,10 +1686,11 @@ function getWAECGrade(s) {
 
 
 
+
 module.exports = router;
 // Server Initialization
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+// const PORT = process.env.PORT || 5000;
+// app.listen(PORT, () => {
+ //  console.log(`🚀 Server running on port ${PORT}`);
+// });
 
