@@ -1427,12 +1427,9 @@ app.post('/api/exams/start-exam', async (req, res) => {
             if (config.examType === 'JAMB') {
                 subjectsToLoad = user.subjectCombination || []; 
             } else {
-                // If it's a specific exam like WAEC Physics, use the config's subject
-                // Fallback to user combination only if config.subject is missing
                 const targetSubject = (config.subject && config.subject !== 'General') 
                     ? config.subject 
                     : null;
-
                 subjectsToLoad = targetSubject ? [targetSubject] : (user.subjectCombination || []);
             }
 
@@ -1443,16 +1440,26 @@ app.post('/api/exams/start-exam', async (req, res) => {
                 return res.status(400).json({ error: "No valid subjects could be determined for this exam." });
             }
 
+            // TIMING LOGIC: Uses flat durationValue based on your 3 timing modes
+            const baseMinutes = config.durationValue || 120;
+            const examDurationSeconds = baseMinutes * 60;
+
             examSession = new Exam({
                 userId,
                 examId,
                 subjectCombination: subjectsToLoad,
                 status: 'active',
                 startTime: new Date(),
-                totalSecondsRemaining: (config.durationValues || 120) * 60,
+                totalSecondsRemaining: examDurationSeconds,
                 responses: []
             });
             await examSession.save();
+
+            // Set allocation safety state immediately to true upon session instantiation
+            await User.updateOne(
+                { _id: userId, "examAllocations.examId": examId },
+                { $set: { "examAllocations.$.hasTaken": true } }
+            );
         }
 
         res.json({ examId: examSession._id });
@@ -1493,7 +1500,11 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
                 subject: sub,
                 questions: questions.filter(q => q.subject === sub).map(q => sanitize(q, sub))
             }));
-            return res.json({ subjects: results, totalSecondsRemaining: session.totalSecondsRemaining, timerMode: config.timerMode });
+            return res.json({ 
+                subjects: results, 
+                totalSecondsRemaining: session.totalSecondsRemaining, 
+                timerMode: config.timingMode || 'general' 
+            });
         }
 
         // --- FRESH GENERATION ---
@@ -1503,38 +1514,83 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         for (const sub of session.subjectCombination) {
             let finalQuestions = [];
             const dist = config.topicDistribution?.filter(d => d.subject === sub);
-            
-            // This ensures we fetch 'WAEC' tagged questions for WAEC exams
             const baseQuery = { subject: sub, examType: config.examType };
 
-            // 1. Check if Topic Distribution is set
-            if (dist && dist.length > 0) {
+            // 1. Strict Structural Sorting Condition for JAMB English
+            if (config.examType === 'JAMB' && isEnglish(sub) && dist && dist.length > 0) {
+                let fetchedIdsInSubject = [];
+                
                 for (const d of dist) {
+                    const qty = parseInt(d.qty) || 0;
                     const query = { ...baseQuery, topic: d.topic.trim() };
                     if (d.subTopic) query.subTopic = d.subTopic.trim();
 
                     let topicQs = await Question.find(query);
+                    const pool = getBatchPool(topicQs, batchNum, qty, config.shuffleSeed);
+                    const selected = pool.slice(0, qty);
                     
-                    // Fallback to general pool of the SAME examType if topic search fails
-                    if (topicQs.length === 0) {
-                        topicQs = await Question.find(baseQuery).limit(parseInt(d.qty));
-                    }
+                    // Keep reading comprehension blocks/passages safely sorted alongside each other
+                    selected.sort((a, b) => String(a.passage || '').localeCompare(String(b.passage || '')));
                     
-                    const pool = getBatchPool(topicQs, batchNum, parseInt(d.qty), config.shuffleSeed);
-                    finalQuestions.push(...pool.slice(0, parseInt(d.qty)));
+                    finalQuestions.push(...selected);
+                    fetchedIdsInSubject.push(...selected.map(q => q._id));
                 }
+
+                // Fallback top-up validation
+                const targetTotal = dist.reduce((acc, curr) => acc + (parseInt(curr.qty) || 0), 0);
+                if (finalQuestions.length < targetTotal) {
+                    const shortfall = targetTotal - finalQuestions.length;
+                    const topUpQs = await Question.find({
+                        ...baseQuery,
+                        _id: { $nin: fetchedIdsInSubject }
+                    }).limit(shortfall);
+                    finalQuestions.push(...topUpQs);
+                }
+            }
+            // 2. Standard distribution strategy for other subjects
+            else if (dist && dist.length > 0) {
+                let targetTotal = 0;
+                let fetchedIdsInSubject = [];
+
+                for (const d of dist) {
+                    const qty = parseInt(d.qty) || 0;
+                    targetTotal += qty;
+
+                    const query = { ...baseQuery, topic: d.topic.trim() };
+                    if (d.subTopic) query.subTopic = d.subTopic.trim();
+
+                    let topicQs = await Question.find(query);
+                    const pool = getBatchPool(topicQs, batchNum, qty, config.shuffleSeed);
+                    const selected = pool.slice(0, qty);
+                    
+                    finalQuestions.push(...selected);
+                    fetchedIdsInSubject.push(...selected.map(q => q._id));
+                }
+
+                if (finalQuestions.length < targetTotal) {
+                    const shortfall = targetTotal - finalQuestions.length;
+                    const topUpQs = await Question.find({ 
+                        ...baseQuery, 
+                        _id: { $nin: fetchedIdsInSubject } 
+                    }).limit(shortfall);
+                    
+                    finalQuestions.push(...topUpQs);
+                    fetchedIdsInSubject.push(...topUpQs.map(q => q._id));
+                }
+
+                const shouldShuffleOrder = config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isEnglish(sub));
+                if (shouldShuffleOrder) finalQuestions.sort(() => Math.random() - 0.5);
             } 
-            // 2. Fallback: If no distribution, use examType general rules
+            // 3. Fallback: Structural configuration pool defaults
             else {
                 const qtyNeeded = isEnglish(sub) ? 60 : 40;
                 const allSubQs = await Question.find(baseQuery);
                 const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
                 finalQuestions = pool.slice(0, qtyNeeded);
-            }
 
-            // Shuffle and Sanitize
-            const shouldShuffleOrder = config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isEnglish(sub));
-            if (shouldShuffleOrder) finalQuestions.sort(() => Math.random() - 0.5);
+                const shouldShuffleOrder = config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isEnglish(sub));
+                if (shouldShuffleOrder) finalQuestions.sort(() => Math.random() - 0.5);
+            }
 
             const sanitized = finalQuestions.map(q => sanitize(q, sub));
             results.push({ subject: sub, questions: sanitized });
@@ -1547,7 +1603,7 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         res.json({ 
             subjects: results, 
             totalSecondsRemaining: session.totalSecondsRemaining, 
-            timerMode: config.timerMode 
+            timerMode: config.timingMode || 'general' 
         });
 
     } catch (err) {
@@ -1556,23 +1612,34 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
 });
 
 
-
 // --- 3. SUBMIT & SCORE ---
 app.post('/api/exams/submit-exam', async (req, res) => {
     try {
         const { examId, responses, subjectAnalysis, status, totalSecondsRemaining } = req.body;
         const session = await Exam.findById(examId);
+        if (!session) return res.status(404).json({ error: "Exam session index missing" });
+        
         const config = await ExamConfig.findById(session.examId);
+        if (!config) return res.status(404).json({ error: "Configuration index mismatch" });
 
-        session.responses = responses;
+        session.responses = responses || [];
         session.status = status;
         session.totalSecondsRemaining = totalSecondsRemaining;
+        
+        // Save raw analysis array directly to database
+        if (subjectAnalysis && Array.isArray(subjectAnalysis)) {
+            session.subjectAnalysis = subjectAnalysis;
+        }
 
         if (status === 'submitted' || status === 'timed-out') {
             const subjectResults = await calculateScore(responses, session, config);
             
             const aggregate = subjectResults.reduce((acc, curr) => acc + curr.normalizedScore2, 0);
             const precise = subjectResults.reduce((acc, curr) => acc + curr.normalizedScore1, 0);
+
+            const maxDurationMinutes = config.durationValue || 120;
+            const totalAllocatedSeconds = maxDurationMinutes * 60;
+            const finalCalculatedTimeTaken = Math.max(0, totalAllocatedSeconds - totalSecondsRemaining);
 
             const finalResult = await Result.findOneAndUpdate(
                 { examSessionId: session._id },
@@ -1583,7 +1650,7 @@ app.post('/api/exams/submit-exam', async (req, res) => {
                     subjectResults,
                     aggregateScore: aggregate,
                     preciseRankingScore: parseFloat(precise.toFixed(3)),
-                    timeTaken: (config.duration * 60) - totalSecondsRemaining,
+                    timeTaken: finalCalculatedTimeTaken,
                     examType: config.examType
                 },
                 { upsert: true, new: true }
@@ -1596,7 +1663,9 @@ app.post('/api/exams/submit-exam', async (req, res) => {
 
             if (config.examType === 'JAMB') {
                 const scoring = require('./scoring');
-                scoring.runNormalization(Result, session.examId).catch(console.error);
+                if (scoring && typeof scoring.runNormalization === 'function') {
+                    scoring.runNormalization(Result, session.examId).catch(console.error);
+                }
             }
 
             await session.save();
@@ -1610,9 +1679,10 @@ app.post('/api/exams/submit-exam', async (req, res) => {
     }
 });
 
+
 // Seeded Batch Pool Helper
 function getBatchPool(allQs, batchNum, qtyNeeded, masterSeed = 123) {
-    if (!allQs.length) return [];
+    if (!allQs || !allQs.length) return [];
     const seed = (batchNum * masterSeed);
     let m = allQs.length, t, i;
     let pool = [...allQs];
@@ -1626,7 +1696,9 @@ function getBatchPool(allQs, batchNum, qtyNeeded, masterSeed = 123) {
 // Unified Result Calculator
 async function calculateScore(responses, session, config) {
     const questions = await Question.find({ _id: { $in: session.questionsServed } });
+    const isJAMB = config.examType === 'JAMB';
     const isWAEC = config.examType === 'WAEC';
+    const cleanResponses = responses || [];
 
     return session.subjectCombination.map(subName => {
         const subQuestions = questions.filter(q => q.subject === subName);
@@ -1635,7 +1707,7 @@ async function calculateScore(responses, session, config) {
         subQuestions.forEach(q => {
             const weight = q.weight || 1;
             sumServedWeight += weight;
-            const userRes = responses.find(r => String(r.questionId) === String(q._id));
+            const userRes = cleanResponses.find(r => String(r.questionId) === String(q._id));
             if (userRes && String(userRes.selectedOptionKey).trim() === String(q.answer).trim()) {
                 correct++;
                 sumCorrectWeight += weight;
@@ -1644,20 +1716,20 @@ async function calculateScore(responses, session, config) {
 
         // Denominator Logic
         let fixedTotal = 0;
-        if (config.examType === 'JAMB') {
+        if (isJAMB) {
             fixedTotal = subName.toLowerCase().includes('english') ? 60 : 40;
         } else {
             const totalInDist = config.topicDistribution
                 ?.filter(d => d.subject === subName)
-                .reduce((acc, curr) => acc + curr.qty, 0);
-            fixedTotal = totalInDist || subQuestions.length;
+                .reduce((acc, curr) => acc + (parseInt(curr.qty) || 0), 0);
+            fixedTotal = totalInDist || subQuestions.length || 40;
         }
 
         // Padding weights for missing questions
         const missing = Math.max(0, fixedTotal - subQuestions.length);
         const totalPossibleWeight = sumServedWeight + (missing * 1);
 
-        const raw1 = (correct / fixedTotal) * 100;
+        const raw1 = fixedTotal > 0 ? (correct / fixedTotal) * 100 : 0;
         const weighted1 = totalPossibleWeight > 0 ? (sumCorrectWeight / totalPossibleWeight) * 100 : 0;
 
         const res = {
@@ -1668,13 +1740,20 @@ async function calculateScore(responses, session, config) {
             rawScore2: Math.round(raw1),
             weightedScore1: weighted1,
             weightedScore2: Math.round(weighted1),
-            normalizedScore1: raw1, // Pre-normalization
+            normalizedScore1: raw1, 
             normalizedScore2: Math.round(raw1)
         };
 
+        // For JAMB, normalization is driven by weighted scores
+        if (isJAMB) {
+            res.normalizedScore1 = weighted1;
+            res.normalizedScore2 = Math.round(weighted1);
+        }
+
+        // For WAEC, normalization is driven by weights + grades applied
         if (isWAEC) {
             res.grade = getWAECGrade(res.weightedScore2);
-            res.normalizedScore1 = weighted1; // For WAEC, weight is the final score
+            res.normalizedScore1 = weighted1; 
             res.normalizedScore2 = Math.round(weighted1);
         }
 
@@ -1687,7 +1766,6 @@ function getWAECGrade(s) {
     if (s >= 60) return "C4"; if (s >= 55) return "C5"; if (s >= 50) return "C6";
     if (s >= 45) return "D7"; if (s >= 40) return "E8"; return "F9";
 }
-
 
 
 
