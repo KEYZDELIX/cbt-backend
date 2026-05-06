@@ -1397,7 +1397,9 @@ app.get('/api/exams/config/:id', async (req, res) => {
 });
 
 
+// =========================================================================
 // --- 1. START OR RESUME EXAM ---
+// =========================================================================
 app.post('/api/exams/start-exam', async (req, res) => {
     try {
         const { userId, examId } = req.body;
@@ -1433,14 +1435,14 @@ app.post('/api/exams/start-exam', async (req, res) => {
                 subjectsToLoad = targetSubject ? [targetSubject] : (user.subjectCombination || []);
             }
 
-            // Final safety filter for nulls/empty strings
+            // Safety filter for nulls/empty strings
             subjectsToLoad = subjectsToLoad.filter(s => s != null && s !== "");
 
             if (subjectsToLoad.length === 0) {
                 return res.status(400).json({ error: "No valid subjects could be determined for this exam." });
             }
 
-            // TIMING LOGIC: Uses flat durationValue based on your 3 timing modes
+            // TIMING LOGIC: Uses flat durationValue (in minutes) converted to seconds
             const baseMinutes = config.durationValue || 120;
             const examDurationSeconds = baseMinutes * 60;
 
@@ -1455,7 +1457,7 @@ app.post('/api/exams/start-exam', async (req, res) => {
             });
             await examSession.save();
 
-            // Set allocation safety state immediately to true upon session instantiation
+            // CRITICAL FIX: Mark hasTaken instantly on start to lock out multi-tab exploits
             await User.updateOne(
                 { _id: userId, "examAllocations.examId": examId },
                 { $set: { "examAllocations.$.hasTaken": true } }
@@ -1469,7 +1471,9 @@ app.post('/api/exams/start-exam', async (req, res) => {
 });
 
 
-// --- 2. FETCH QUESTIONS ---
+// =========================================================================
+// --- 2. FETCH QUESTIONS (WITH SMART STRUCTURED JAMB ENGLISH) ---
+// =========================================================================
 app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
     try {
         const session = await Exam.findById(req.params.sessionId).populate('userId');
@@ -1479,6 +1483,7 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         const isEnglish = (sub) => sub && sub.toLowerCase().includes('english');
         const batchNum = session.userId.batchNumber || 1;
 
+        // Clean option layout formatting and configuration-driven option shuffling
         const sanitize = (q, subject) => {
             const plain = q.toObject ? q.toObject() : q;
             let options = plain.options || [];
@@ -1493,7 +1498,7 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             };
         };
 
-        // --- RESUMPTION ---
+        // --- RESUMPTION LAYER ---
         if (session.questionsServed && session.questionsServed.length > 0) {
             const questions = await Question.find({ _id: { $in: session.questionsServed } });
             const results = session.subjectCombination.map(sub => ({
@@ -1507,7 +1512,7 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             });
         }
 
-        // --- FRESH GENERATION ---
+        // --- FRESH GENERATION LAYER ---
         const results = [];
         let allServedIds = [];
 
@@ -1516,27 +1521,30 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             const dist = config.topicDistribution?.filter(d => d.subject === sub);
             const baseQuery = { subject: sub, examType: config.examType };
 
-            // 1. Strict Structural Sorting Condition for JAMB English
+            // FIX 4: JAMB English Smart Structural Partition Assembly (No global pool shuffling)
             if (config.examType === 'JAMB' && isEnglish(sub) && dist && dist.length > 0) {
                 let fetchedIdsInSubject = [];
                 
                 for (const d of dist) {
                     const qty = parseInt(d.qty) || 0;
+                    if (qty <= 0) continue;
+
                     const query = { ...baseQuery, topic: d.topic.trim() };
                     if (d.subTopic) query.subTopic = d.subTopic.trim();
 
                     let topicQs = await Question.find(query);
+                    // Pool sliced strictly within topic segment boundary
                     const pool = getBatchPool(topicQs, batchNum, qty, config.shuffleSeed);
                     const selected = pool.slice(0, qty);
                     
-                    // Keep reading comprehension blocks/passages safely sorted alongside each other
+                    // Group questions that share identical passages structurally together
                     selected.sort((a, b) => String(a.passage || '').localeCompare(String(b.passage || '')));
                     
                     finalQuestions.push(...selected);
                     fetchedIdsInSubject.push(...selected.map(q => q._id));
                 }
 
-                // Fallback top-up validation
+                // Integrity Shortfall Check for JAMB English
                 const targetTotal = dist.reduce((acc, curr) => acc + (parseInt(curr.qty) || 0), 0);
                 if (finalQuestions.length < targetTotal) {
                     const shortfall = targetTotal - finalQuestions.length;
@@ -1547,7 +1555,7 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
                     finalQuestions.push(...topUpQs);
                 }
             }
-            // 2. Standard distribution strategy for other subjects
+            // 2. Standard distribution strategy for other subjects (Shuffled at topic layers)
             else if (dist && dist.length > 0) {
                 let targetTotal = 0;
                 let fetchedIdsInSubject = [];
@@ -1567,6 +1575,7 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
                     fetchedIdsInSubject.push(...selected.map(q => q._id));
                 }
 
+                // Shortfall Top-up
                 if (finalQuestions.length < targetTotal) {
                     const shortfall = targetTotal - finalQuestions.length;
                     const topUpQs = await Question.find({ 
@@ -1578,12 +1587,13 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
                     fetchedIdsInSubject.push(...topUpQs.map(q => q._id));
                 }
 
-                const shouldShuffleOrder = config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isEnglish(sub));
+                const shouldShuffleOrder = config.shuffleType === 'both' || (config.shuffleType === 'smart');
                 if (shouldShuffleOrder) finalQuestions.sort(() => Math.random() - 0.5);
             } 
-            // 3. Fallback: Structural configuration pool defaults
+            // FIX 1: Non-JAMB Config-driven Question Quantity Fallback Rules
             else {
-                const qtyNeeded = isEnglish(sub) ? 60 : 40;
+                // If it's WAEC/Internal, look first at config schema total questions, fallback to exam standards
+                const qtyNeeded = config.totalQuestions || (isEnglish(sub) ? 60 : 40);
                 const allSubQs = await Question.find(baseQuery);
                 const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
                 finalQuestions = pool.slice(0, qtyNeeded);
@@ -1612,21 +1622,23 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
 });
 
 
-// --- 3. SUBMIT & SCORE ---
+// =========================================================================
+// --- 3. SUBMIT, HARD-LOCK SCORE & NORMALIZATION ---
+// =========================================================================
 app.post('/api/exams/submit-exam', async (req, res) => {
     try {
         const { examId, responses, subjectAnalysis, status, totalSecondsRemaining } = req.body;
         const session = await Exam.findById(examId);
-        if (!session) return res.status(404).json({ error: "Exam session index missing" });
+        if (!session) return res.status(404).json({ error: "Exam session missing" });
         
         const config = await ExamConfig.findById(session.examId);
-        if (!config) return res.status(404).json({ error: "Configuration index mismatch" });
+        if (!config) return res.status(404).json({ error: "Configuration configuration mismatch" });
 
         session.responses = responses || [];
         session.status = status;
         session.totalSecondsRemaining = totalSecondsRemaining;
         
-        // Save raw analysis array directly to database
+        // FIX 1 REVISITED: Save the dynamic live analytics data straight to the DB
         if (subjectAnalysis && Array.isArray(subjectAnalysis)) {
             session.subjectAnalysis = subjectAnalysis;
         }
@@ -1656,15 +1668,21 @@ app.post('/api/exams/submit-exam', async (req, res) => {
                 { upsert: true, new: true }
             );
 
+            // Double confirmation check to lock the allocation status inside user profile
             await User.updateOne(
                 { _id: session.userId, "examAllocations.examId": session.examId },
                 { $set: { "examAllocations.$.hasTaken": true } }
             );
 
+            // FIX 3: Try/Catch Safety Pocket surrounding standard JAMB dynamic scoring modules
             if (config.examType === 'JAMB') {
-                const scoring = require('./scoring');
-                if (scoring && typeof scoring.runNormalization === 'function') {
-                    scoring.runNormalization(Result, session.examId).catch(console.error);
+                try {
+                    const scoring = require('./scoring');
+                    if (scoring && typeof scoring.runNormalization === 'function') {
+                        await scoring.runNormalization(Result, session.examId);
+                    }
+                } catch (scoreErr) {
+                    console.error("[CRITICAL SHIELD]: scoring.js process handled safely to protect submission:", scoreErr);
                 }
             }
 
@@ -1680,7 +1698,9 @@ app.post('/api/exams/submit-exam', async (req, res) => {
 });
 
 
-// Seeded Batch Pool Helper
+// =========================================================================
+// --- HELPERS (SEEDED BATCH POOL & UNIFIED SCORING MATCH CALCULATOR) ---
+// =========================================================================
 function getBatchPool(allQs, batchNum, qtyNeeded, masterSeed = 123) {
     if (!allQs || !allQs.length) return [];
     const seed = (batchNum * masterSeed);
@@ -1693,7 +1713,6 @@ function getBatchPool(allQs, batchNum, qtyNeeded, masterSeed = 123) {
     return pool;
 }
 
-// Unified Result Calculator
 async function calculateScore(responses, session, config) {
     const questions = await Question.find({ _id: { $in: session.questionsServed } });
     const isJAMB = config.examType === 'JAMB';
@@ -1707,14 +1726,16 @@ async function calculateScore(responses, session, config) {
         subQuestions.forEach(q => {
             const weight = q.weight || 1;
             sumServedWeight += weight;
-            const userRes = cleanResponses.find(r => String(r.questionId) === String(q._id));
+            
+            // FIX 2: Explicit String Conversion across ObjectIds to avoid evaluation leakage
+            const userRes = cleanResponses.find(r => String(r.questionId).trim() === String(q._id).trim());
             if (userRes && String(userRes.selectedOptionKey).trim() === String(q.answer).trim()) {
                 correct++;
                 sumCorrectWeight += weight;
             }
         });
 
-        // Denominator Logic
+        // Fixed baseline totals verification
         let fixedTotal = 0;
         if (isJAMB) {
             fixedTotal = subName.toLowerCase().includes('english') ? 60 : 40;
@@ -1722,10 +1743,9 @@ async function calculateScore(responses, session, config) {
             const totalInDist = config.topicDistribution
                 ?.filter(d => d.subject === subName)
                 .reduce((acc, curr) => acc + (parseInt(curr.qty) || 0), 0);
-            fixedTotal = totalInDist || subQuestions.length || 40;
+            fixedTotal = totalInDist || config.totalQuestions || subQuestions.length || 40;
         }
 
-        // Padding weights for missing questions
         const missing = Math.max(0, fixedTotal - subQuestions.length);
         const totalPossibleWeight = sumServedWeight + (missing * 1);
 
@@ -1744,13 +1764,12 @@ async function calculateScore(responses, session, config) {
             normalizedScore2: Math.round(raw1)
         };
 
-        // For JAMB, normalization is driven by weighted scores
+        // FIX 2 ACCURACY: Force JAMB score evaluations directly out of calculated weights
         if (isJAMB) {
             res.normalizedScore1 = weighted1;
             res.normalizedScore2 = Math.round(weighted1);
         }
 
-        // For WAEC, normalization is driven by weights + grades applied
         if (isWAEC) {
             res.grade = getWAECGrade(res.weightedScore2);
             res.normalizedScore1 = weighted1; 
