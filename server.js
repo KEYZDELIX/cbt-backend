@@ -1518,50 +1518,36 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
 
         for (const sub of session.subjectCombination) {
             let finalQuestions = [];
-            const dist = config.topicDistribution?.filter(d => d.subject === sub);
+            const isSubEnglish = isEnglish(sub);
+            
+            // Extract distribution from config if it exists
+            let dist = config.topicDistribution?.filter(d => d.subject === sub) || [];
+
+            // --- FIX 4: FORCE SMART JAMB ENGLISH DISTRIBUTION IF ADMIN IS EMPTY ---
+            if (config.examType === 'JAMB' && isSubEnglish && dist.length === 0) {
+                console.log(`[ENGINE NOTE]: No topic distribution found for JAMB English. Forcing structural configuration.`);
+                dist = [
+                    { section: "Section A", topic: "Comprehension Passages", qty: 5 },
+        { section: "Section A", topic: "Cloze Passage" , qty: 10},
+        { section: "Section A", topic: "Reading Text", qty: 10 },
+        { section: "Section B", topic: "Sentence Interpretation" , qty: 5 },
+        { section: "Section B", topic: "Antonyms" , qty: 5 },
+        { section: "Section B", topic: "Synonyms" , qty:5 },
+        { section: "Section B", topic: "Sentence Completion", qty: 10 },
+        { section: "Section C", topic: "Oral Forms", qty: 10 }
+                ];
+            }
+
             const baseQuery = { subject: sub, examType: config.examType };
 
-            // FIX 4: JAMB English Smart Structural Partition Assembly (No global pool shuffling)
-            if (config.examType === 'JAMB' && isEnglish(sub) && dist && dist.length > 0) {
-                let fetchedIdsInSubject = [];
-                
-                for (const d of dist) {
-                    const qty = parseInt(d.qty) || 0;
-                    if (qty <= 0) continue;
-
-                    const query = { ...baseQuery, topic: d.topic.trim() };
-                    if (d.subTopic) query.subTopic = d.subTopic.trim();
-
-                    let topicQs = await Question.find(query);
-                    // Pool sliced strictly within topic segment boundary
-                    const pool = getBatchPool(topicQs, batchNum, qty, config.shuffleSeed);
-                    const selected = pool.slice(0, qty);
-                    
-                    // Group questions that share identical passages structurally together
-                    selected.sort((a, b) => String(a.passage || '').localeCompare(String(b.passage || '')));
-                    
-                    finalQuestions.push(...selected);
-                    fetchedIdsInSubject.push(...selected.map(q => q._id));
-                }
-
-                // Integrity Shortfall Check for JAMB English
-                const targetTotal = dist.reduce((acc, curr) => acc + (parseInt(curr.qty) || 0), 0);
-                if (finalQuestions.length < targetTotal) {
-                    const shortfall = targetTotal - finalQuestions.length;
-                    const topUpQs = await Question.find({
-                        ...baseQuery,
-                        _id: { $nin: fetchedIdsInSubject }
-                    }).limit(shortfall);
-                    finalQuestions.push(...topUpQs);
-                }
-            }
-            // 2. Standard distribution strategy for other subjects (Shuffled at topic layers)
-            else if (dist && dist.length > 0) {
+            // 1. Process via Topic Distribution Matrix (Dynamic Admin or Hardcoded JAMB English Backup)
+            if (dist && dist.length > 0) {
                 let targetTotal = 0;
                 let fetchedIdsInSubject = [];
 
                 for (const d of dist) {
                     const qty = parseInt(d.qty) || 0;
+                    if (qty <= 0) continue;
                     targetTotal += qty;
 
                     const query = { ...baseQuery, topic: d.topic.trim() };
@@ -1571,11 +1557,16 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
                     const pool = getBatchPool(topicQs, batchNum, qty, config.shuffleSeed);
                     const selected = pool.slice(0, qty);
                     
+                    // IF IT'S ENGLISH: Keep questions sharing the same passage grouped cleanly together
+                    if (isSubEnglish) {
+                        selected.sort((a, b) => String(a.passage || '').localeCompare(String(b.passage || '')));
+                    }
+                    
                     finalQuestions.push(...selected);
                     fetchedIdsInSubject.push(...selected.map(q => q._id));
                 }
 
-                // Shortfall Top-up
+                // Top-up Shortfall Safeguard
                 if (finalQuestions.length < targetTotal) {
                     const shortfall = targetTotal - finalQuestions.length;
                     const topUpQs = await Question.find({ 
@@ -1583,23 +1574,38 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
                         _id: { $nin: fetchedIdsInSubject } 
                     }).limit(shortfall);
                     
+                    if (isSubEnglish) {
+                        topUpQs.sort((a, b) => String(a.passage || '').localeCompare(String(b.passage || '')));
+                    }
                     finalQuestions.push(...topUpQs);
-                    fetchedIdsInSubject.push(...topUpQs.map(q => q._id));
                 }
 
+                // Shuffle the overall order only if it's NOT JAMB English (to preserve passage flow)
                 const shouldShuffleOrder = config.shuffleType === 'both' || (config.shuffleType === 'smart');
-                if (shouldShuffleOrder) finalQuestions.sort(() => Math.random() - 0.5);
+                if (shouldShuffleOrder && !isSubEnglish) {
+                    finalQuestions.sort(() => Math.random() - 0.5);
+                }
             } 
-            // FIX 1: Non-JAMB Config-driven Question Quantity Fallback Rules
+            // 2. FIX 1: Strict General Fallback (When no distribution exists for non-English subjects)
             else {
-                // If it's WAEC/Internal, look first at config schema total questions, fallback to exam standards
-                const qtyNeeded = config.totalQuestions || (isEnglish(sub) ? 60 : 40);
+                // Ironclad Rule: JAMB defaults to 60/40, WAEC defaults to config.totalQuestions or 40
+                let qtyNeeded = 40;
+                if (config.examType === 'JAMB') {
+                    qtyNeeded = isSubEnglish ? 60 : 40;
+                } else {
+                    qtyNeeded = config.totalQuestions || (isSubEnglish ? 60 : 40);
+                }
+
+                console.log(`[FETCH PLUG]: Loading flat fallback dataset for ${sub}. Quantity required: ${qtyNeeded}`);
+
                 const allSubQs = await Question.find(baseQuery);
                 const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
                 finalQuestions = pool.slice(0, qtyNeeded);
 
-                const shouldShuffleOrder = config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isEnglish(sub));
-                if (shouldShuffleOrder) finalQuestions.sort(() => Math.random() - 0.5);
+                const shouldShuffleOrder = config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isSubEnglish);
+                if (shouldShuffleOrder) {
+                    finalQuestions.sort(() => Math.random() - 0.5);
+                }
             }
 
             const sanitized = finalQuestions.map(q => sanitize(q, sub));
@@ -1714,10 +1720,15 @@ function getBatchPool(allQs, batchNum, qtyNeeded, masterSeed = 123) {
 }
 
 async function calculateScore(responses, session, config) {
+    // Fetch all serving questions recorded for this session instance
     const questions = await Question.find({ _id: { $in: session.questionsServed } });
     const isJAMB = config.examType === 'JAMB';
     const isWAEC = config.examType === 'WAEC';
-    const cleanResponses = responses || [];
+    
+    // Ensure responses fallback to a safe array representation
+    const cleanResponses = Array.isArray(responses) ? responses : [];
+
+    console.log(`[SCORING ENGINE]: Evaluating ${cleanResponses.length} answers against ${questions.length} served questions.`);
 
     return session.subjectCombination.map(subName => {
         const subQuestions = questions.filter(q => q.subject === subName);
@@ -1727,15 +1738,25 @@ async function calculateScore(responses, session, config) {
             const weight = q.weight || 1;
             sumServedWeight += weight;
             
-            // FIX 2: Explicit String Conversion across ObjectIds to avoid evaluation leakage
-            const userRes = cleanResponses.find(r => String(r.questionId).trim() === String(q._id).trim());
-            if (userRes && String(userRes.selectedOptionKey).trim() === String(q.answer).trim()) {
-                correct++;
-                sumCorrectWeight += weight;
+            // --- CRITICAL ALIGNMENT MATRIX ---
+            // Force type conversion to string, trim whitespace, and match lowercase hashes safely
+            const userRes = cleanResponses.find(r => {
+                if (!r.questionId || !q._id) return false;
+                return String(r.questionId).trim().toLowerCase() === String(q._id).trim().toLowerCase();
+            });
+
+            if (userRes && userRes.selectedOptionKey) {
+                const cleanUserOption = String(userRes.selectedOptionKey).trim().toLowerCase();
+                const cleanCorrectOption = String(q.answer).trim().toLowerCase();
+
+                if (cleanUserOption === cleanCorrectOption) {
+                    correct++;
+                    sumCorrectWeight += weight;
+                }
             }
         });
 
-        // Fixed baseline totals verification
+        // Determine baseline structural parameters
         let fixedTotal = 0;
         if (isJAMB) {
             fixedTotal = subName.toLowerCase().includes('english') ? 60 : 40;
@@ -1749,6 +1770,7 @@ async function calculateScore(responses, session, config) {
         const missing = Math.max(0, fixedTotal - subQuestions.length);
         const totalPossibleWeight = sumServedWeight + (missing * 1);
 
+        // Score scaling math execution
         const raw1 = fixedTotal > 0 ? (correct / fixedTotal) * 100 : 0;
         const weighted1 = totalPossibleWeight > 0 ? (sumCorrectWeight / totalPossibleWeight) * 100 : 0;
 
@@ -1764,7 +1786,7 @@ async function calculateScore(responses, session, config) {
             normalizedScore2: Math.round(raw1)
         };
 
-        // FIX 2 ACCURACY: Force JAMB score evaluations directly out of calculated weights
+        // Standardize output vectors based on institutional blueprints
         if (isJAMB) {
             res.normalizedScore1 = weighted1;
             res.normalizedScore2 = Math.round(weighted1);
@@ -1776,14 +1798,9 @@ async function calculateScore(responses, session, config) {
             res.normalizedScore2 = Math.round(weighted1);
         }
 
+        console.log(`[SCORE LOG]: Subject: ${subName} | Correct: ${correct}/${fixedTotal} | Final Normalized Value: ${res.normalizedScore2}`);
         return res;
     });
-}
-
-function getWAECGrade(s) {
-    if (s >= 75) return "A1"; if (s >= 70) return "B2"; if (s >= 65) return "B3";
-    if (s >= 60) return "C4"; if (s >= 55) return "C5"; if (s >= 50) return "C6";
-    if (s >= 45) return "D7"; if (s >= 40) return "E8"; return "F9";
 }
 
 
