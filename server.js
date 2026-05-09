@@ -1478,18 +1478,20 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
     try {
         console.log(`[FETCH START]: Session ${req.params.sessionId}`);
         
+        // 1. Fetch Session and Config
         const session = await Exam.findById(req.params.sessionId).populate('userId');
-        const config = await ExamConfig.findById(session.examId);
-        
-        if (!session || !config) return res.status(404).json({ error: "Exam configuration or session missing" });
+        if (!session) return res.status(404).json({ error: "Exam session not found" });
 
-        const batchNum = session.userId.batchNumber || 1;
+        const config = await ExamConfig.findById(session.examId);
+        if (!config) return res.status(404).json({ error: "Exam configuration missing" });
+
+        // Safety: Handle batch number and English detection
+        const batchNum = (session.userId && session.userId.batchNumber) ? session.userId.batchNumber : 1;
         const isEnglish = (sub) => sub && (sub.toLowerCase().includes('english') || sub.toLowerCase().includes('use of english'));
 
-        // --- 1. THE REFINED SEEDED BATCH HELPER ---
+        // Seeded Shuffle Helper
         const getBatchPool = (allQs, bNum, masterSeed = 123) => {
             if (!allQs || !allQs.length) return [];
-            // Seeded shuffle ensures everyone in the same Batch gets the same questions
             const seed = (bNum * masterSeed);
             let m = allQs.length, t, i;
             let pool = [...allQs];
@@ -1500,19 +1502,19 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             return pool;
         };
 
-        // --- 2. THE SMART SANITIZER (Handles ShuffleType) ---
-        const sanitize = (q, subject) => {
+        // Option & Data Sanitizer
+        const sanitize = (q) => {
+            if (!q) return null;
             const plain = q.toObject ? q.toObject() : q;
             let options = plain.options || [];
             
-            // "Both" or "Smart" shuffles options. "None" stays static.
             const shouldShuffleOpts = config.shuffleType === 'both' || config.shuffleType === 'smart';
             if (shouldShuffleOpts && options.length > 0) {
                 options = [...options].sort(() => 0.5 - Math.random());
             }
             return {
                 ...plain,
-                questionText: plain.questionText || plain.question,
+                questionText: plain.questionText || plain.question || "Question text missing",
                 options
             };
         };
@@ -1524,15 +1526,16 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             const qMap = new Map(questions.map(q => [q._id.toString(), q]));
             const orderedQs = session.questionsServed.map(id => qMap.get(id.toString())).filter(Boolean);
 
-            const results = session.subjectCombination.map(sub => ({
+            const combo = session.subjectCombination || [];
+            const results = combo.map(sub => ({
                 subject: sub,
-                questions: orderedQs.filter(q => q.subject === sub).map(q => sanitize(q, sub))
+                questions: orderedQs.filter(q => q.subject === sub).map(q => sanitize(q)).filter(Boolean)
             }));
 
             return res.json({ 
                 subjects: results, 
                 totalSecondsRemaining: session.totalSecondsRemaining, 
-                timerMode: config.timingMode 
+                timerMode: config.timingMode || 'general'
             });
         }
 
@@ -1540,75 +1543,70 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
         const results = [];
         let allServedIds = [];
         
-        // Subject source depends on ExamType
-        const subjectList = (config.examType === 'JAMB') ? session.subjectCombination : config.subjects;
+        // CRITICAL SCHEMA FIX: Using config.subject.
+        // We wrap it in [].flat() to handle cases where it might be a string OR an array.
+        let subjectList = [];
+        if (config.examType === 'JAMB') {
+            subjectList = session.subjectCombination || [];
+        } else {
+            // Converts config.subject to an array even if it's stored as a single string
+            subjectList = Array.isArray(config.subject) ? config.subject : (config.subject ? [config.subject] : []);
+        }
+
+        if (subjectList.length === 0) {
+            console.error("[FETCH ERROR]: Subject list is empty. Config ID:", config._id);
+            return res.status(400).json({ error: "No subjects found in Exam Configuration." });
+        }
 
         for (const sub of subjectList) {
             let finalQuestions = [];
             const isSubEng = isEnglish(sub);
 
-            // A. STATIC SELECTION (Structured)
             if (config.selectionMode === 'static') {
-                console.log(`[GEN]: Static Selection for ${sub}`);
-                
-                // Use distribution from Config or Fallback for English
-                let dist = config.topicDistribution?.filter(d => d.subject === sub) || [];
+                let dist = (config.topicDistribution || []).filter(d => d.subject === sub);
                 
                 if (isSubEng && dist.length === 0) {
-                    console.log(`[FALLBACK]: Triggering English Blueprint for ${config.examType}`);
                     dist = getEnglishFallback(config.examType);
                 }
 
                 if (dist.length > 0) {
                     finalQuestions = await generateFromStaticDistribution(dist, sub, config, batchNum, getBatchPool);
                 } else {
-                    // Static but no topics defined? Pull general batch
                     const allQs = await Question.find({ subject: sub, examType: config.examType });
                     finalQuestions = getBatchPool(allQs, batchNum, config.shuffleSeed).slice(0, config.totalQuestions || 40);
                 }
 
-                // Smart Shuffle Logic for Static Mode
                 if (!isSubEng && config.shuffleType === 'both') {
-                    // Shuffling questions for non-English even in static mode if "both" is selected
                     finalQuestions.sort(() => 0.5 - Math.random());
                 }
-            } 
-            // B. RANDOM SELECTION (Unstructured)
-            else {
-                console.log(`[GEN]: Random Selection for ${sub}`);
+            } else {
                 const targetQty = isSubEng ? 60 : (config.totalQuestions || 40);
                 const allQs = await Question.find({ subject: sub, examType: config.examType });
-                
-                // Everyone gets a random shuffle
                 finalQuestions = allQs.sort(() => 0.5 - Math.random()).slice(0, targetQty);
             }
 
-            const sanitized = finalQuestions.map(q => sanitize(q, sub));
+            const sanitized = finalQuestions.map(q => sanitize(q)).filter(Boolean);
             results.push({ subject: sub, questions: sanitized });
             allServedIds.push(...sanitized.map(q => q._id));
         }
 
-        // Ensure session.totalSecondsRemaining is updated if it's a fresh start
-if (!session.questionsServed || session.questionsServed.length === 0) {
-    session.totalSecondsRemaining = config.duration * 60; // duration in minutes
-    session.questionsServed = allServedIds;
-    await session.save();
-}
+        // Fresh Start Initialization
+        session.totalSecondsRemaining = (config.durationValue || 120) * 60;
+        session.questionsServed = allServedIds;
+        await session.save();
 
-res.json({ 
-    subjects: results, 
-    totalSecondsRemaining: session.totalSecondsRemaining, 
-    // This tells the frontend which timer logic to run:
-    timerMode: config.timingMode, // 'general', 'perQuestion', or 'perSet'
-    // Pass these so the frontend knows the limits for sub-timing
-    perQuestionSeconds: config.perQuestionSeconds || 60,
-    perSetQty: config.perSetQty || 10,
-    perSetSeconds: config.perSetSeconds || 600
-});
+        res.json({ 
+            subjects: results, 
+            totalSecondsRemaining: session.totalSecondsRemaining, 
+            timerMode: config.timingMode || 'general',
+            perQuestionSeconds: config.perQuestionSeconds || 60,
+            perSetQty: config.perSetQty || 10,
+            perSetSeconds: config.perSetSeconds || 600
+        });
 
     } catch (err) {
         console.error("[FETCH CRITICAL ERROR]:", err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Server Internal Error: " + err.message });
     }
 });
 
