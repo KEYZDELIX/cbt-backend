@@ -4,7 +4,7 @@ const ResultSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     examId: { type: mongoose.Schema.Types.ObjectId, ref: 'ExamConfig' }, 
     examSessionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Exam' },
-    
+    examType: String,
     // Define the internal fields here
     subjectResults: [{
         subjectName: String,
@@ -15,7 +15,8 @@ const ResultSchema = new mongoose.Schema({
         weightedScore1: Number,  // Decimal Weighted
         weightedScore2: Number,  // Rounded Weighted
         normalizedScore1: Number, // Decimal Curved
-        normalizedScore2: Number  // Rounded Curved
+        normalizedScore2: Number,  // Rounded Curved
+        grade: String
     }],
 
     aggregateScore: Number,       // Sum of normalizedScore2

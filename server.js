@@ -1476,20 +1476,38 @@ app.post('/api/exams/start-exam', async (req, res) => {
 // =========================================================================
 app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
     try {
+        console.log(`[FETCH START]: Session ${req.params.sessionId}`);
+        
         const session = await Exam.findById(req.params.sessionId).populate('userId');
         const config = await ExamConfig.findById(session.examId);
-        if (!session || !config) return res.status(404).json({ error: "Session missing" });
+        
+        if (!session || !config) return res.status(404).json({ error: "Exam configuration or session missing" });
 
-        const isEnglish = (sub) => sub && sub.toLowerCase().includes('english');
         const batchNum = session.userId.batchNumber || 1;
+        const isEnglish = (sub) => sub && (sub.toLowerCase().includes('english') || sub.toLowerCase().includes('use of english'));
 
-        // --- 1. SANITIZATION & OPTION SHUFFLING ---
+        // --- 1. THE REFINED SEEDED BATCH HELPER ---
+        const getBatchPool = (allQs, bNum, masterSeed = 123) => {
+            if (!allQs || !allQs.length) return [];
+            // Seeded shuffle ensures everyone in the same Batch gets the same questions
+            const seed = (bNum * masterSeed);
+            let m = allQs.length, t, i;
+            let pool = [...allQs];
+            while (m) {
+                i = Math.floor(Math.abs(Math.sin(seed + m) * m--));
+                t = pool[m]; pool[m] = pool[i]; pool[i] = t;
+            }
+            return pool;
+        };
+
+        // --- 2. THE SMART SANITIZER (Handles ShuffleType) ---
         const sanitize = (q, subject) => {
             const plain = q.toObject ? q.toObject() : q;
             let options = plain.options || [];
-            // Shuffling logic based on config and subject type
-            const shouldShuffleOptions = config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isEnglish(subject));
-            if (shouldShuffleOptions && options.length > 0) {
+            
+            // "Both" or "Smart" shuffles options. "None" stays static.
+            const shouldShuffleOpts = config.shuffleType === 'both' || config.shuffleType === 'smart';
+            if (shouldShuffleOpts && options.length > 0) {
                 options = [...options].sort(() => 0.5 - Math.random());
             }
             return {
@@ -1499,126 +1517,70 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             };
         };
 
-        // --- 2. RESUMPTION LAYER ---
+        // --- 3. RESUMPTION LAYER ---
         if (session.questionsServed && session.questionsServed.length > 0) {
+            console.log(`[RESUME]: Batch ${batchNum} returning to existing session.`);
             const questions = await Question.find({ _id: { $in: session.questionsServed } });
+            const qMap = new Map(questions.map(q => [q._id.toString(), q]));
+            const orderedQs = session.questionsServed.map(id => qMap.get(id.toString())).filter(Boolean);
+
             const results = session.subjectCombination.map(sub => ({
                 subject: sub,
-                questions: questions.filter(q => q.subject === sub).map(q => sanitize(q, sub))
+                questions: orderedQs.filter(q => q.subject === sub).map(q => sanitize(q, sub))
             }));
+
             return res.json({ 
                 subjects: results, 
                 totalSecondsRemaining: session.totalSecondsRemaining, 
-                timerMode: config.timingMode || 'general' 
+                timerMode: config.timingMode 
             });
         }
 
-        // --- 3. FRESH GENERATION LAYER ---
+        // --- 4. FRESH GENERATION LAYER ---
         const results = [];
         let allServedIds = [];
+        
+        // Subject source depends on ExamType
+        const subjectList = (config.examType === 'JAMB') ? session.subjectCombination : config.subjects;
 
-        for (const sub of session.subjectCombination) {
+        for (const sub of subjectList) {
             let finalQuestions = [];
-            const isSubEnglish = isEnglish(sub);
-            let dist = config.topicDistribution?.filter(d => d.subject === sub) || [];
+            const isSubEng = isEnglish(sub);
 
-            // --- JAMB USE OF ENGLISH FALLBACK BLUEPRINT (UPDATED CAPITALIZATION) ---
-            if (config.examType === 'JAMB' && isSubEnglish && dist.length === 0) {
-                dist = [
-                    { topic: "section A: Comprehension and Summary", subTopic: "Comprehension Passage", qty: 5 },
-                    { topic: "section A: Comprehension and Summary", subTopic: "Cloze Passage", qty: 10 },
-                    { topic: "section A: Comprehension and Summary", subTopic: "Reading Text", qty: 10 },
-                    { topic: "section B: Lexis and Structure", subTopic: "Sentence Interpretation", qty: 5 },
-                    { topic: "section B: Lexis and Structure", subTopic: "Antonyms", qty: 5 },
-                    { topic: "section B: Lexis and Structure", subTopic: "Synonyms", qty: 5 },
-                    { topic: "section B: Lexis and Structure", subTopic: "Sentence Completion", qty: 10 },
-                    { topic: "Section C: Oral Forms", subTopic: "Word Stress", qty: 2 },
-                    { topic: "Section C: Oral Forms", subTopic: "Vowels", qty: 2 },
-                    { topic: "Section C: Oral Forms", subTopic: "Consonants", qty: 2 },
-                    { topic: "Section C: Oral Forms", subTopic: "Rhymes", qty: 2 },
-                    { topic: "Section C: Oral Forms", subTopic: "Emphatic Stress", qty: 2 }
-                ];
-            }
-
-            const baseQuery = { subject: sub, examType: config.examType };
-
-            if (dist && dist.length > 0) {
-                let targetTotal = 0;
-                let fetchedIdsInSubject = [];
-
-                for (const d of dist) {
-                    const qty = parseInt(d.qty) || 0;
-                    if (qty <= 0) continue;
-                    targetTotal += qty;
-
-                    const query = { ...baseQuery, topic: d.topic.trim() };
-                    if (d.subTopic) query.subTopic = d.subTopic.trim();
-
-                    let topicQs = await Question.find(query);
-
-                    // --- PASSAGE GROUPING LOGIC ---
-                    const isSectionA = d.topic.toLowerCase().includes("section a");
-                    const isReadingText = d.subTopic.toLowerCase().includes("reading text");
-                    
-                    if (isSubEnglish && isSectionA && !isReadingText) {
-                        // Group by subSubTopic for Comprehension/Cloze
-                        const groups = {};
-                        topicQs.forEach(q => {
-                            const groupKey = q.subSubTopic || q.passageId || 'ungrouped';
-                            if (!groups[groupKey]) groups[groupKey] = [];
-                            groups[groupKey].push(q);
-                        });
-
-                        const shuffledGroupKeys = Object.keys(groups).sort(() => 0.5 - Math.random());
-                        let sectionSelected = [];
-                        for (const key of shuffledGroupKeys) {
-                            if (sectionSelected.length >= qty) break;
-                            sectionSelected.push(...groups[key]);
-                        }
-                        const limited = sectionSelected.slice(0, qty);
-                        finalQuestions.push(...limited);
-                        fetchedIdsInSubject.push(...limited.map(q => q._id));
-                    } 
-                    else {
-                        // Reading Text, Lexis and Structure, and Oral Forms
-                        const pool = getBatchPool(topicQs, batchNum, qty, config.shuffleSeed);
-                        const selected = pool.slice(0, qty);
-                        
-                        // Shuffle internally unless it's the Reading Text (to preserve chapter flow)
-                        if (!isReadingText) {
-                            selected.sort(() => 0.5 - Math.random());
-                        }
-                        
-                        finalQuestions.push(...selected);
-                        fetchedIdsInSubject.push(...selected.map(q => q._id));
-                    }
+            // A. STATIC SELECTION (Structured)
+            if (config.selectionMode === 'static') {
+                console.log(`[GEN]: Static Selection for ${sub}`);
+                
+                // Use distribution from Config or Fallback for English
+                let dist = config.topicDistribution?.filter(d => d.subject === sub) || [];
+                
+                if (isSubEng && dist.length === 0) {
+                    console.log(`[FALLBACK]: Triggering English Blueprint for ${config.examType}`);
+                    dist = getEnglishFallback(config.examType);
                 }
 
-                // Shortfall Top-up
-                if (finalQuestions.length < targetTotal) {
-                    const shortfall = targetTotal - finalQuestions.length;
-                    const topUpQs = await Question.find({ 
-                        ...baseQuery, 
-                        _id: { $nin: fetchedIdsInSubject } 
-                    }).limit(shortfall);
-                    finalQuestions.push(...topUpQs);
+                if (dist.length > 0) {
+                    finalQuestions = await generateFromStaticDistribution(dist, sub, config, batchNum, getBatchPool);
+                } else {
+                    // Static but no topics defined? Pull general batch
+                    const allQs = await Question.find({ subject: sub, examType: config.examType });
+                    finalQuestions = getBatchPool(allQs, batchNum, config.shuffleSeed).slice(0, config.totalQuestions || 40);
                 }
 
-                // Overall Shuffle (Only for Non-English)
-                if ((config.shuffleType === 'both' || config.shuffleType === 'smart') && !isSubEnglish) {
-                    finalQuestions.sort(() => Math.random() - 0.5);
+                // Smart Shuffle Logic for Static Mode
+                if (!isSubEng && config.shuffleType === 'both') {
+                    // Shuffling questions for non-English even in static mode if "both" is selected
+                    finalQuestions.sort(() => 0.5 - Math.random());
                 }
             } 
+            // B. RANDOM SELECTION (Unstructured)
             else {
-                // FALLBACK FOR OTHER SUBJECTS (Maths, Physics, etc.)
-                let qtyNeeded = config.examType === 'JAMB' ? (isSubEnglish ? 60 : 40) : (config.totalQuestions || 40);
-                const allSubQs = await Question.find(baseQuery);
-                const pool = getBatchPool(allSubQs, batchNum, qtyNeeded, config.shuffleSeed);
-                finalQuestions = pool.slice(0, qtyNeeded);
-
-                if (config.shuffleType === 'both' || (config.shuffleType === 'smart' && !isSubEnglish)) {
-                    finalQuestions.sort(() => Math.random() - 0.5);
-                }
+                console.log(`[GEN]: Random Selection for ${sub}`);
+                const targetQty = isSubEng ? 60 : (config.totalQuestions || 40);
+                const allQs = await Question.find({ subject: sub, examType: config.examType });
+                
+                // Everyone gets a random shuffle
+                finalQuestions = allQs.sort(() => 0.5 - Math.random()).slice(0, targetQty);
             }
 
             const sanitized = finalQuestions.map(q => sanitize(q, sub));
@@ -1626,20 +1588,81 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
             allServedIds.push(...sanitized.map(q => q._id));
         }
 
-        session.questionsServed = allServedIds;
-        await session.save();
+        // Ensure session.totalSecondsRemaining is updated if it's a fresh start
+if (!session.questionsServed || session.questionsServed.length === 0) {
+    session.totalSecondsRemaining = config.duration * 60; // duration in minutes
+    session.questionsServed = allServedIds;
+    await session.save();
+}
 
-        res.json({ 
-            subjects: results, 
-            totalSecondsRemaining: session.totalSecondsRemaining, 
-            timerMode: config.timingMode || 'general' 
-        });
+res.json({ 
+    subjects: results, 
+    totalSecondsRemaining: session.totalSecondsRemaining, 
+    // This tells the frontend which timer logic to run:
+    timerMode: config.timingMode, // 'general', 'perQuestion', or 'perSet'
+    // Pass these so the frontend knows the limits for sub-timing
+    perQuestionSeconds: config.perQuestionSeconds || 60,
+    perSetQty: config.perSetQty || 10,
+    perSetSeconds: config.perSetSeconds || 600
+});
 
     } catch (err) {
-        console.error("[FETCH ERR]:", err);
+        console.error("[FETCH CRITICAL ERROR]:", err);
         res.status(500).json({ error: err.message });
     }
 });
+
+// --- HELPER: STATIC DISTRIBUTOR ---
+async function generateFromStaticDistribution(dist, subject, config, batchNum, poolHelper) {
+    let output = [];
+    for (const d of dist) {
+        const query = { subject, topic: d.topic.trim(), examType: config.examType };
+        if (d.subTopic) query.subTopic = d.subTopic.trim();
+        if (d.subsubTopic) query.subsubTopic = d.subsubTopic.trim();
+
+        const allAvailable = await Question.find(query);
+        const qty = parseInt(d.qty) || 0;
+
+        if (d.subTopic?.toLowerCase().includes("passage")) {
+            // Grouping Logic for Passages
+            const groups = {};
+            allAvailable.forEach(q => {
+                const key = q.subsubTopic || q.passageId || 'none';
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(q);
+            });
+            const keys = Object.keys(groups).sort();
+            if (keys.length > 0) {
+                const selectedKey = keys[(batchNum - 1) % keys.length];
+                output.push(...groups[selectedKey].slice(0, qty));
+            }
+        } else {
+            // Seeded batching for normal topics
+            const pool = poolHelper(allAvailable, batchNum, config.shuffleSeed || 123);
+            output.push(...pool.slice(0, qty));
+        }
+    }
+    return output;
+}
+
+// --- HELPER: ENGLISH BLUEPRINTS ---
+function getEnglishFallback(type) {
+    // Standard JAMB sequence as the hardcoded safety net
+    return [
+        { topic: "Section A: Comprehension and Summary", subTopic: "Comprehension Passage", qty: 5 },
+        { topic: "Section A: Comprehension and Summary", subTopic: "Cloze Passage", qty: 10 },
+        { topic: "Section A: Comprehension and Summary", subTopic: "Reading Text", qty: 10 },
+        { topic: "Section B: Lexis and Structure", subTopic: "Sentence Interpretation", qty: 5 },
+        { topic: "Section B: Lexis and Structure", subTopic: "Antonyms", qty: 5 },
+        { topic: "Section B: Lexis and Structure", subTopic: "Synonyms", qty: 5 },
+        { topic: "Section B: Lexis and Structure", subTopic: "Sentence Completion", qty: 10 },
+        { topic: "Section C: Oral Forms", subTopic: "Word Stress", qty: 2 },
+        { topic: "Section C: Oral Forms", subTopic: "Vowels", qty: 2 },
+        { topic: "Section C: Oral Forms", subTopic: "Consonants", qty: 2 },
+        { topic: "Section C: Oral Forms", subTopic: "Rhymes", qty: 2 },
+        { topic: "Section C: Oral Forms", subTopic: "Emphatic Stress", qty: 2 }
+    ];
+}
 
 // =========================================================================
 // --- 3. SUBMIT, HARD-LOCK SCORE & NORMALIZATION ---
@@ -1697,25 +1720,54 @@ app.post('/api/exams/submit-exam', async (req, res) => {
             );
 
             // Only flip the allocation lock if the student is officially finalizing their paper
-            if (status === 'submitted' || status === 'timed-out') {
-                await User.updateOne(
-                    { _id: session.userId, "examAllocations.examId": session.examId },
-                    { $set: { "examAllocations.$.hasTaken": true } }
-                );
+            // ... inside app.post('/api/exams/submit-exam') ...
 
-                // Safe execution wrapper for external JAMB scaling libraries
-                if (isJAMB) {
-                    try {
-                        const scoring = require('./scoring');
-                        if (scoring && typeof scoring.runNormalization === 'function') {
-                            await scoring.runNormalization(Result, session.examId);
-                        }
-                    } catch (scoreErr) {
-                        console.error("[CRITICAL SHIELD]: scoring.js process bypassed cleanly:", scoreErr);
-                    }
-                }
-            }
+if (status === 'submitted' || status === 'timed-out' || !isJAMB) {
+    const subjectResults = await calculateScore(session.responses, session, config);
+    
+    // 1. Initial calculation
+    let aggregate = subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore2 || 0), 0);
+    let precise = subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore1 || 0), 0);
+
+    // 2. CREATE THE RESULT RECORD FIRST
+    finalResultData = await Result.findOneAndUpdate(
+        { examSessionId: session._id },
+        {
+            userId: session.userId,
+            examId: session.examId,
+            examSessionId: session._id,
+            subjectResults: subjectResults,
+            aggregateScore: aggregate,
+            preciseRankingScore: parseFloat(precise.toFixed(3)),
+            timeTaken: Math.max(0, (config.durationValue * 60) - totalSecondsRemaining),
+            examType: config.examType // REQUIRES SCHEMA UPDATE
+        },
+        { upsert: true, new: true }
+    );
+
+    // 3. IF JAMB, NORMALIZE BEFORE RESPONDING
+    if (isJAMB && (status === 'submitted' || status === 'timed-out')) {
+        try {
+            const scoring = require('./scoring');
+            // We await this so finalResultData contains the CURVED scores
+            await scoring.runNormalization(Result, session.examId);
+            
+            // RE-FETCH the result so finalResultData has the new curved aggregate
+            finalResultData = await Result.findOne({ examSessionId: session._id });
+        } catch (scoreErr) {
+            console.error("[SCORING ERR]:", scoreErr);
         }
+    }
+
+    // 4. LOCK THE ALLOCATION
+    if (status === 'submitted' || status === 'timed-out') {
+        await User.updateOne(
+            { _id: session.userId, "examAllocations.examId": session.examId },
+            { $set: { "examAllocations.$.hasTaken": true } }
+        );
+    }
+}
+}
 
         await session.save();
         
@@ -1731,22 +1783,6 @@ app.post('/api/exams/submit-exam', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-
-
-// =========================================================================
-// --- HELPERS (SEEDED BATCH POOL & UNIFIED SCORING MATCH CALCULATOR) ---
-// =========================================================================
-function getBatchPool(allQs, batchNum, qtyNeeded, masterSeed = 123) {
-    if (!allQs || !allQs.length) return [];
-    const seed = (batchNum * masterSeed);
-    let m = allQs.length, t, i;
-    let pool = [...allQs];
-    while (m) {
-        i = Math.floor(Math.abs(Math.sin(seed + m) * m--));
-        t = pool[m]; pool[m] = pool[i]; pool[i] = t;
-    }
-    return pool;
-}
 
 
 
