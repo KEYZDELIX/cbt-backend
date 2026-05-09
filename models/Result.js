@@ -25,5 +25,8 @@ const ResultSchema = new mongoose.Schema({
     timeTaken: Number,
     examDate: { type: Date, default: Date.now }
 });
+// Add these right before module.exports
+ResultSchema.index({ examId: 1 });
+ResultSchema.index({ examSessionId: 1 });
 
 module.exports = mongoose.model('Result', ResultSchema);

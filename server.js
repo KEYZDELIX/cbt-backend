@@ -1579,29 +1579,42 @@ app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
                 if (!isSubEng && config.shuffleType === 'both') {
                     finalQuestions.sort(() => 0.5 - Math.random());
                 }
-            } else {
-                const targetQty = isSubEng ? 60 : (config.totalQuestions || 40);
+              } else {
+                // FORCE JAMB STANDARDS: English is 60, all other subjects are 40
+                const targetQty = isSubEng ? 60 : 40; 
+                console.log(`[GEN]: Strict JAMB limit for ${sub}: ${targetQty} questions`);
+                
                 const allQs = await Question.find({ subject: sub, examType: config.examType });
-                finalQuestions = allQs.sort(() => 0.5 - Math.random()).slice(0, targetQty);
+                
+                // Use getBatchPool to ensure seeded consistency, then slice to target
+                finalQuestions = getBatchPool(allQs, batchNum, config.shuffleSeed || 123).slice(0, targetQty);
             }
 
             const sanitized = finalQuestions.map(q => sanitize(q)).filter(Boolean);
             results.push({ subject: sub, questions: sanitized });
             allServedIds.push(...sanitized.map(q => q._id));
         }
+// --- 5. FINALIZATION & SAVE ---
+        // Only set the total time if this is the VERY FIRST time questions are being served
+        if (!session.questionsServed || session.questionsServed.length === 0) {
+            const totalMinutes = config.durationValue || 120;
+            session.totalSecondsRemaining = totalMinutes * 60;
+            session.questionsServed = allServedIds;
+            await session.save();
+        }
 
-        // Fresh Start Initialization
-        session.totalSecondsRemaining = (config.durationValue || 120) * 60;
-        session.questionsServed = allServedIds;
-        await session.save();
-
+        // Send the response
         res.json({ 
             subjects: results, 
             totalSecondsRemaining: session.totalSecondsRemaining, 
             timerMode: config.timingMode || 'general',
-            perQuestionSeconds: config.perQuestionSeconds || 60,
+            selectionMode: config.selectionMode,
+            
+            // Map sub-timing strictly from the config durationValue
+            // This ensures perQuestion and perSet always use your specific duration settings
+            perQuestionSeconds: (config.durationValue || 1) * 60, 
             perSetQty: config.perSetQty || 10,
-            perSetSeconds: config.perSetSeconds || 600
+            perSetSeconds: (config.durationValue || 10) * 60 
         });
 
     } catch (err) {
@@ -1673,9 +1686,12 @@ app.post('/api/exams/submit-exam', async (req, res) => {
         if (!session) return res.status(404).json({ error: "Exam session missing" });
         
         const config = await ExamConfig.findById(session.examId);
-        if (!config) return res.status(404).json({ error: "Configuration configuration mismatch" });
+        if (!config) return res.status(404).json({ error: "Configuration mismatch" });
 
-        // Maintain the active dynamic array states
+        const isJAMB = config.examType === 'JAMB';
+        let finalResultData = null;
+
+        // 1. UPDATE SESSION STATE
         session.responses = responses || [];
         session.status = status;
         session.totalSecondsRemaining = totalSecondsRemaining;
@@ -1684,92 +1700,62 @@ app.post('/api/exams/submit-exam', async (req, res) => {
             session.subjectAnalysis = subjectAnalysis;
         }
 
-        const isJAMB = config.examType === 'JAMB';
-        let finalResultData = null;
-
-        // --- FIX 5: LIVE SCORING STRATEGY VECTOR ---
-        // Force calculation if explicitly submitting, OR if it's a non-JAMB exam (WAEC) running a background sync
+        // 2. SCORING & FINALIZATION LOGIC
+        // Always calculate scores for non-JAMB exams (Live WAEC scoring) 
+        // OR when the exam is officially ending (submitted/timed-out)
         if (status === 'submitted' || status === 'timed-out' || !isJAMB) {
             
-            // Safe execution of calculation matrix
+            // Execute scoring engine
             const subjectResults = await calculateScore(session.responses, session, config);
             
+            // Calculate Aggregates
             const aggregate = subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore2 || 0), 0);
             const precise = subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore1 || 0), 0);
+            const totalDuration = (config.durationValue || 120) * 60;
+            const timeTaken = Math.max(0, totalDuration - totalSecondsRemaining);
 
-            const maxDurationMinutes = config.durationValue || 120;
-            const totalAllocatedSeconds = maxDurationMinutes * 60;
-            const finalCalculatedTimeTaken = Math.max(0, totalAllocatedSeconds - totalSecondsRemaining);
-
-            // Update or create the results document cleanly
+            // 3. UPSERT RESULT RECORD
             finalResultData = await Result.findOneAndUpdate(
                 { examSessionId: session._id },
                 {
                     userId: session.userId,
                     examId: session.examId,
                     examSessionId: session._id,
-                    subjectResults: subjectResults, // Now aligns perfectly with schema parameters
+                    subjectResults: subjectResults,
                     aggregateScore: aggregate,
                     preciseRankingScore: parseFloat(precise.toFixed(3)),
-                    timeTaken: finalCalculatedTimeTaken,
+                    timeTaken: timeTaken,
                     examType: config.examType
                 },
                 { upsert: true, new: true }
             );
 
-            // Only flip the allocation lock if the student is officially finalizing their paper
-            // ... inside app.post('/api/exams/submit-exam') ...
+            // 4. JAMB NORMALIZATION (POST-SUBMIT)
+            if (isJAMB && (status === 'submitted' || status === 'timed-out')) {
+                try {
+                    // This is where your scoring.js logic kicks in
+                    const scoring = require('./scoring');
+                    await scoring.runNormalization(Result, session.examId);
+                    
+                    // Re-fetch to get the "Curved" values for the frontend
+                    finalResultData = await Result.findOne({ examSessionId: session._id });
+                } catch (scoreErr) {
+                    console.error("[SCORING ERR]: Normalization failed, showing raw instead.", scoreErr);
+                }
+            }
 
-if (status === 'submitted' || status === 'timed-out' || !isJAMB) {
-    const subjectResults = await calculateScore(session.responses, session, config);
-    
-    // 1. Initial calculation
-    let aggregate = subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore2 || 0), 0);
-    let precise = subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore1 || 0), 0);
-
-    // 2. CREATE THE RESULT RECORD FIRST
-    finalResultData = await Result.findOneAndUpdate(
-        { examSessionId: session._id },
-        {
-            userId: session.userId,
-            examId: session.examId,
-            examSessionId: session._id,
-            subjectResults: subjectResults,
-            aggregateScore: aggregate,
-            preciseRankingScore: parseFloat(precise.toFixed(3)),
-            timeTaken: Math.max(0, (config.durationValue * 60) - totalSecondsRemaining),
-            examType: config.examType // REQUIRES SCHEMA UPDATE
-        },
-        { upsert: true, new: true }
-    );
-
-    // 3. IF JAMB, NORMALIZE BEFORE RESPONDING
-    if (isJAMB && (status === 'submitted' || status === 'timed-out')) {
-        try {
-            const scoring = require('./scoring');
-            // We await this so finalResultData contains the CURVED scores
-            await scoring.runNormalization(Result, session.examId);
-            
-            // RE-FETCH the result so finalResultData has the new curved aggregate
-            finalResultData = await Result.findOne({ examSessionId: session._id });
-        } catch (scoreErr) {
-            console.error("[SCORING ERR]:", scoreErr);
+            // 5. LOCK USER ACCESS
+            if (status === 'submitted' || status === 'timed-out') {
+                await User.updateOne(
+                    { _id: session.userId, "examAllocations.examId": session.examId },
+                    { $set: { "examAllocations.$.hasTaken": true } }
+                );
+            }
         }
-    }
-
-    // 4. LOCK THE ALLOCATION
-    if (status === 'submitted' || status === 'timed-out') {
-        await User.updateOne(
-            { _id: session.userId, "examAllocations.examId": session.examId },
-            { $set: { "examAllocations.$.hasTaken": true } }
-        );
-    }
-}
-}
 
         await session.save();
         
-        // Return structured data feedback vectors so frontend never hits an undefined loop
+        // Return exactly what showResults expects
         return res.json({ 
             success: true, 
             status: session.status,
@@ -1778,21 +1764,21 @@ if (status === 'submitted' || status === 'timed-out' || !isJAMB) {
 
     } catch (err) {
         console.error("[SERVER SUBMIT CRASH]:", err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: "Submission Error: " + err.message });
     }
 });
 
-
-
+/**
+ * THE SCORING ENGINE
+ * Handles Weighted scores, JAMB fixed totals, and Missing question weight fallbacks.
+ */
 async function calculateScore(responses, session, config) {
     const questions = await Question.find({ _id: { $in: session.questionsServed } });
     const isJAMB = config.examType === 'JAMB';
     const isWAEC = config.examType === 'WAEC';
-    
     const cleanResponses = Array.isArray(responses) ? responses : [];
 
-    console.log(`[SCORING ENGINE]: Evaluating ${cleanResponses.length} items against ${questions.length} elements.`);
-
+    // Map each subject in the candidate's combination
     return session.subjectCombination.map(subName => {
         const subQuestions = questions.filter(q => q.subject === subName);
         let correct = 0, sumCorrectWeight = 0, sumServedWeight = 0;
@@ -1801,75 +1787,88 @@ async function calculateScore(responses, session, config) {
             const weight = q.weight || 1;
             sumServedWeight += weight;
             
-            const userRes = cleanResponses.find(r => {
-                if (!r.questionId || !q._id) return false;
-                return String(r.questionId).trim().toLowerCase() === String(q._id).trim().toLowerCase();
-            });
+            const userRes = cleanResponses.find(r => 
+                String(r.questionId) === String(q._id)
+            );
 
             if (userRes && userRes.selectedOptionKey) {
-                const cleanUserOption = String(userRes.selectedOptionKey).trim().toLowerCase();
-                const cleanCorrectOption = String(q.answer).trim().toLowerCase();
+                const userOpt = String(userRes.selectedOptionKey).trim().toLowerCase();
+                const correctOpt = String(q.answer).trim().toLowerCase();
 
-                if (cleanUserOption === cleanCorrectOption) {
+                if (userOpt === correctOpt) {
                     correct++;
                     sumCorrectWeight += weight;
                 }
             }
         });
 
+        // Determine expected total for the subject
         let fixedTotal = 0;
         if (isJAMB) {
             fixedTotal = subName.toLowerCase().includes('english') ? 60 : 40;
         } else {
-            const totalInDist = config.topicDistribution
+            const distTotal = config.topicDistribution
                 ?.filter(d => d.subject === subName)
                 .reduce((acc, curr) => acc + (parseInt(curr.qty) || 0), 0);
-            fixedTotal = totalInDist || config.totalQuestions || subQuestions.length || 40;
+            fixedTotal = distTotal || config.totalQuestions || subQuestions.length || 40;
         }
 
-        const missing = Math.max(0, fixedTotal - subQuestions.length);
-        const totalPossibleWeight = sumServedWeight + (missing * 1);
+        // --- THE "MISSING QUESTION" WEIGHT LOGIC ---
+        // If the DB didn't have enough questions to match the exam total, 
+        // we fill the remaining "potential weight" with 1 per missing question.
+        const missingQty = Math.max(0, fixedTotal - subQuestions.length);
+        const totalPossibleWeight = sumServedWeight + (missingQty * 1);
 
-        const raw1 = fixedTotal > 0 ? (correct / fixedTotal) * 100 : 0;
-        const weighted1 = totalPossibleWeight > 0 ? (sumCorrectWeight / totalPossibleWeight) * 100 : 0;
+        // Raw calculations
+        const rawPercentage = fixedTotal > 0 ? (correct / fixedTotal) * 100 : 0;
+        const weightedPercentage = totalPossibleWeight > 0 ? (sumCorrectWeight / totalPossibleWeight) * 100 : 0;
 
-        // --- ALIGNMENT WRAPPER FOR MONGO SCHEMA ---
         const res = {
             subjectName: subName,
-            correctCount: correct, // FIXED: Matches "correctCount" in ResultSchema exactly
+            correctCount: correct,
             totalQuestions: fixedTotal,
-            rawScore1: raw1,
-            rawScore2: Math.round(raw1),
-            weightedScore1: weighted1,
-            weightedScore2: Math.round(weighted1),
-            normalizedScore1: raw1, 
-            normalizedScore2: Math.round(raw1)
+            rawScore1: rawPercentage,
+            rawScore2: Math.round(rawPercentage),
+            weightedScore1: weightedPercentage,
+            weightedScore2: Math.round(weightedPercentage),
+            normalizedScore1: rawPercentage, // Default
+            normalizedScore2: Math.round(rawPercentage),
+            grade: ""
         };
 
+        // --- SPECIFIC EXAM LOGIC ---
         if (isJAMB) {
-            res.normalizedScore1 = weighted1;
-            res.normalizedScore2 = Math.round(weighted1);
+            // JAMB uses Weighted score as Normalized Score 1
+            res.normalizedScore1 = weightedPercentage;
+            res.normalizedScore2 = Math.round(weightedPercentage);
         }
 
         if (isWAEC) {
-            // Safety wrapper surrounding local grading engines to block empty exceptions
-            try {
-                if (typeof getWAECGrade === 'function') {
-                    res.grade = getWAECGrade(res.weightedScore2);
-                } else {
-                    res.grade = "C4"; // Standard structural fallback benchmark
-                }
-            } catch (e) {
-                res.grade = "C4";
+            // WAEC also uses weights but requires a letter grade
+            res.normalizedScore1 = weightedPercentage;
+            res.normalizedScore2 = Math.round(weightedPercentage);
+            
+            // Grades are calculated on the weighted total
+            if (typeof getWAECGrade === 'function') {
+                res.grade = getWAECGrade(res.weightedScore2);
+            } else {
+                // Inline Grade Fallback if helper is missing
+                const s = res.weightedScore2;
+                if (s >= 75) res.grade = "A1";
+                else if (s >= 70) res.grade = "B2";
+                else if (s >= 65) res.grade = "B3";
+                else if (s >= 60) res.grade = "C4";
+                else if (s >= 55) res.grade = "C5";
+                else if (s >= 50) res.grade = "C6";
+                else if (s >= 45) res.grade = "D7";
+                else if (s >= 40) res.grade = "E8";
+                else res.grade = "F9";
             }
-            res.normalizedScore1 = weighted1; 
-            res.normalizedScore2 = Math.round(weighted1);
         }
 
         return res;
     });
 }
-
 
 module.exports = router;
 // Server Initialization
