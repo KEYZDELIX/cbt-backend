@@ -44,7 +44,7 @@ async function seedSystem() {
         firstName: "System",
         lastName: "Administrator",
         email: "savvyscholarstutors@gmail.com",
-        gender: "MALE",
+        gender: "Male",
         phone: "+2349063771245",
         regNo: "SYS-001",
         password: hashedPassword,
