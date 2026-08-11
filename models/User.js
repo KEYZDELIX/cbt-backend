@@ -139,12 +139,11 @@ const UserSchema = new mongoose.Schema({
 // ==========================================
 // INDEXES & CONSTRAINTS
 // ==========================================
-
 // Ensure regNo is unique WITHIN the same organization (allows two different orgs to have a regNo "ST-001")
 UserSchema.index({ organizationId: 1, regNo: 1 }, { unique: true });
 
-// Fast lookup for authentication
-UserSchema.index({ email: 1 });
+// Optional: Keep phone index only if 'phone' does NOT have index: true or unique: true in its field definition
 UserSchema.index({ phone: 1 });
+
 
 module.exports = mongoose.model('User', UserSchema);

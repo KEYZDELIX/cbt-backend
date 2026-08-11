@@ -102,19 +102,14 @@ const OrganizationSchema = new mongoose.Schema({
 // INDEXES & MIDDLEWARE
 // ==========================================
 
-// Fast lookup for tenant routing via URL slug or code
-OrganizationSchema.index({ slug: 1 });
-OrganizationSchema.index({ code: 1 });
-
 // Auto-generate slug before saving if not explicitly provided
-OrganizationSchema.pre('save', function(next) {
+OrganizationSchema.pre('save', function() {
   if (this.isModified('name') && !this.slug) {
     this.slug = this.name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)+/g, '');
   }
-  next();
 });
 
 module.exports = mongoose.model('Organization', OrganizationSchema);
