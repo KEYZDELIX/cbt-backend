@@ -4,6 +4,14 @@ const ExamConfig = require('../models/ExamConfig');
 const Question = require('../models/Question');
 
 /**
+ * Helper to retrieve the questions array regardless of schema field naming
+ */
+const getQuestionsList = (attemptDoc) => {
+  if (!attemptDoc) return [];
+  return attemptDoc.questions || attemptDoc.questionSnapshots || attemptDoc.answers || [];
+};
+
+/**
  * 1. Start or Resume Candidate Exam Attempt
  * Endpoint: POST /api/exams/start
  */
@@ -40,38 +48,7 @@ exports.startExam = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Linked exam configuration blueprint is missing.' });
     }
 
-    // B. Check Existing Attempts (Resume or Block)
-    const existingAttempts = await Exam.find({ 
-      sessionId: session._id, 
-      userId, 
-      organizationId 
-    });
-
-    const activeAttempt = existingAttempts.find(exp => exp.status === 'active');
-    
-    // Resume existing active attempt
-    if (activeAttempt) {
-      if (activeAttempt.expiresAt && new Date() >= new Date(activeAttempt.expiresAt)) {
-        activeAttempt.status = 'expired';
-        await activeAttempt.save();
-        return res.status(403).json({ success: false, error: 'Exam time expired while you were away.' });
-      }
-
-      return res.status(200).json({
-        success: true,
-        message: 'Resuming active exam attempt',
-        resumed: true,
-        data: activeAttempt
-      });
-    }
-
-    // Enforce Max Attempts Limit
-    const completedAttempts = existingAttempts.filter(exp => ['submitted', 'expired'].includes(exp.status));
-    if (completedAttempts.length >= (config.maxAttempts || 1)) {
-      return res.status(403).json({ success: false, error: 'Maximum allowed attempt limit reached for this exam.' });
-    }
-
-    // C. Fetch Questions & Build Frozen Snapshot
+    // B. Fetch Questions & Build Frozen Snapshots
     const questions = await Question.find({
       organizationId,
       subject: config.subject,
@@ -100,18 +77,60 @@ exports.startExam = async (req, res) => {
       secondsSpent: 0
     }));
 
+    // C. Check Existing Attempts (Resume or Block)
+    const existingAttempts = await Exam.find({ 
+      sessionId: session._id, 
+      userId, 
+      organizationId 
+    });
+
+    const activeAttempt = existingAttempts.find(exp => exp.status === 'active');
+    
+    // Resume existing active attempt
+    if (activeAttempt) {
+      if (activeAttempt.expiresAt && new Date() >= new Date(activeAttempt.expiresAt)) {
+        activeAttempt.status = 'expired';
+        await activeAttempt.save();
+        return res.status(403).json({ success: false, error: 'Exam time expired while you were away.' });
+      }
+
+      // Self-heal: ensure questions payload exists on doc
+      let activeList = getQuestionsList(activeAttempt);
+      if (activeList.length === 0) {
+        activeAttempt.questions = questionSnapshots;
+        activeAttempt.questionSnapshots = questionSnapshots;
+        activeAttempt.answers = questionSnapshots;
+        await activeAttempt.save();
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Resuming active exam attempt',
+        resumed: true,
+        data: activeAttempt
+      });
+    }
+
+    // Enforce Max Attempts Limit
+    const completedAttempts = existingAttempts.filter(exp => ['submitted', 'expired'].includes(exp.status));
+    if (completedAttempts.length >= (config.maxAttempts || 1)) {
+      return res.status(403).json({ success: false, error: 'Maximum allowed attempt limit reached for this exam.' });
+    }
+
     // D. Compute Timestamps
     const startTime = new Date();
     const durationMinutes = config.durationValue || 60;
     const expiresAt = new Date(startTime.getTime() + durationMinutes * 60 * 1000);
 
-    // E. Save New Exam Attempt
+    // E. Save New Exam Attempt (Map all standard array keys to match your schema definition)
     const attempt = await Exam.create({
       organizationId,
       userId,
       sessionId: session._id,
       examConfigId: config._id,
       questions: questionSnapshots,
+      questionSnapshots: questionSnapshots,
+      answers: questionSnapshots,
       startTime,
       expiresAt,
       status: 'active'
@@ -154,20 +173,33 @@ exports.submitAnswer = async (req, res) => {
       return res.status(403).json({ success: false, error: 'Time limit exceeded. Exam expired.' });
     }
 
-    const qIndex = attempt.questions.findIndex(q => q.questionId.toString() === questionId);
+    const questionsList = getQuestionsList(attempt);
+    if (questionsList.length === 0) {
+      return res.status(400).json({ success: false, error: 'No questions registered for this exam attempt.' });
+    }
+
+    const qIndex = questionsList.findIndex(q => {
+      const targetId = q.questionId || q._id;
+      return targetId && targetId.toString() === questionId;
+    });
+
     if (qIndex === -1) {
       return res.status(404).json({ success: false, error: 'Question not found in this exam attempt.' });
     }
 
     if (selectedOption !== undefined) {
-      attempt.questions[qIndex].selectedOption = selectedOption;
+      questionsList[qIndex].selectedOption = selectedOption;
     }
     if (isFlagged !== undefined) {
-      attempt.questions[qIndex].isFlagged = isFlagged;
+      questionsList[qIndex].isFlagged = isFlagged;
     }
     if (secondsSpent) {
-      attempt.questions[qIndex].secondsSpent = (attempt.questions[qIndex].secondsSpent || 0) + secondsSpent;
+      questionsList[qIndex].secondsSpent = (questionsList[qIndex].secondsSpent || 0) + secondsSpent;
     }
+
+    attempt.markModified('questions');
+    attempt.markModified('questionSnapshots');
+    attempt.markModified('answers');
 
     await attempt.save();
 
@@ -176,8 +208,8 @@ exports.submitAnswer = async (req, res) => {
       message: 'Response synced successfully',
       data: {
         questionId,
-        selectedOption: attempt.questions[qIndex].selectedOption,
-        isFlagged: attempt.questions[qIndex].isFlagged
+        selectedOption: questionsList[qIndex].selectedOption,
+        isFlagged: questionsList[qIndex].isFlagged
       }
     });
   } catch (error) {
@@ -205,7 +237,8 @@ exports.submitExam = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Exam has already been submitted.' });
     }
 
-    const questionIds = attempt.questions.map(q => q.questionId);
+    const questionsList = getQuestionsList(attempt);
+    const questionIds = questionsList.map(q => q.questionId || q._id);
     const masterQuestions = await Question.find({ _id: { $in: questionIds } });
     const questionMap = new Map(masterQuestions.map(q => [q._id.toString(), q]));
 
@@ -214,8 +247,9 @@ exports.submitExam = async (req, res) => {
     let totalWrong = 0;
     let totalUnanswered = 0;
 
-    attempt.questions.forEach(snapshot => {
-      const originalQuestion = questionMap.get(snapshot.questionId.toString());
+    questionsList.forEach(snapshot => {
+      const qId = snapshot.questionId || snapshot._id;
+      const originalQuestion = questionMap.get(qId ? qId.toString() : '');
 
       if (!snapshot.selectedOption) {
         totalUnanswered++;
@@ -227,7 +261,7 @@ exports.submitExam = async (req, res) => {
       }
     });
 
-    const totalQuestions = attempt.questions.length;
+    const totalQuestions = questionsList.length;
     const percentage = totalQuestions > 0 ? parseFloat(((totalCorrect / totalQuestions) * 100).toFixed(2)) : 0;
 
     attempt.status = 'submitted';
