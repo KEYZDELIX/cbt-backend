@@ -18,9 +18,12 @@ const tenantContext = async (req, res, next) => {
       return res.status(400).json({ error: "Missing x-organization-id header or tenant context." });
     }
 
-    // 3. Verify organization status
+    // 3. Verify organization status (check status string or boolean flag)
     const org = await Organization.findById(tenantId);
-    if (!org || !org.isActive) {
+    
+    const isOrgActive = org && (org.status === 'ACTIVE' || org.isActive === true);
+
+    if (!org || !isOrgActive) {
       return res.status(404).json({ error: "Target organization does not exist or is inactive." });
     }
 
