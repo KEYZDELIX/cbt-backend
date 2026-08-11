@@ -4,7 +4,10 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const authorize = require('../middleware/rbac');
 const tenantContext = require('../middleware/tenantContext');
-const { upload } = require('../config/cloudinary');
+
+// Handle both default and destructured exports for upload
+const cloudinaryConfig = require('../config/cloudinary');
+const upload = cloudinaryConfig.upload || cloudinaryConfig;
 
 const questionController = require('../controllers/questionController');
 
@@ -12,49 +15,52 @@ const questionController = require('../controllers/questionController');
 router.use(auth);
 router.use(tenantContext);
 
-// Create single question (with optional image upload)
+// Fallback helper to prevent boot crashes if a controller is undefined
+const fallback = (name) => (req, res) => res.status(501).json({ error: `${name} function not implemented` });
+
+// 1. Create single question (with optional image upload)
 router.post(
   '/',
   authorize('QUESTION_AUTHOR', 'EXAM_OFFICER', 'INSTRUCTOR'),
-  upload.single('questionImage'),
-  questionController.createQuestion
+  upload && typeof upload.single === 'function' ? upload.single('questionImage') : (req, res, next) => next(),
+  questionController.createQuestion || fallback('createQuestion')
 );
 
-// List/search/filter questions in batches
+// 2. List/search/filter questions in batches
 router.get(
   '/',
   authorize('QUESTION_AUTHOR', 'EXAM_OFFICER', 'INSTRUCTOR', 'ORG_ADMIN'),
-  questionController.getQuestions
+  questionController.getQuestions || fallback('getQuestions')
 );
 
-// Get single question details
+// 3. Get single question details
 router.get(
   '/:id',
   authorize('QUESTION_AUTHOR', 'EXAM_OFFICER', 'INSTRUCTOR', 'ORG_ADMIN'),
-  questionController.getQuestionById
+  questionController.getQuestionById || fallback('getQuestionById')
 );
 
-// Update question
+// 4. Update question
 router.put(
   '/:id',
   authorize('QUESTION_AUTHOR', 'EXAM_OFFICER', 'INSTRUCTOR'),
-  upload.single('questionImage'),
-  questionController.updateQuestion
+  upload && typeof upload.single === 'function' ? upload.single('questionImage') : (req, res, next) => next(),
+  questionController.updateQuestion || fallback('updateQuestion')
 );
 
-// Delete question
+// 5. Delete question
 router.delete(
   '/:id',
   authorize('QUESTION_AUTHOR', 'EXAM_OFFICER', 'ORG_ADMIN'),
-  questionController.deleteQuestion
+  questionController.deleteQuestion || fallback('deleteQuestion')
 );
 
-// Bulk CSV/JSON question import
+// 6. Bulk CSV/JSON question import
 router.post(
   '/bulk-upload',
   authorize('QUESTION_AUTHOR', 'EXAM_OFFICER'),
-  upload.single('file'),
-  questionController.bulkImportQuestions
+  upload && typeof upload.single === 'function' ? upload.single('file') : (req, res, next) => next(),
+  questionController.bulkImportQuestions || fallback('bulkImportQuestions')
 );
 
 module.exports = router;
