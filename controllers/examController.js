@@ -4,11 +4,37 @@ const ExamConfig = require('../models/ExamConfig');
 const Question = require('../models/Question');
 
 /**
- * Helper to retrieve the questions array regardless of schema field naming
+ * Helper to retrieve questions array across schema variations
  */
 const getQuestionsList = (attemptDoc) => {
   if (!attemptDoc) return [];
   return attemptDoc.questions || attemptDoc.questionSnapshots || attemptDoc.answers || [];
+};
+
+/**
+ * Helper to generate question snapshots from blueprint config
+ */
+const generateSnapshots = async (organizationId, config) => {
+  const questions = await Question.find({
+    organizationId,
+    subject: config.subject,
+    examType: config.examType,
+    paperType: config.paperType,
+    status: 'APPROVED'
+  }).limit(config.totalQuestions);
+
+  return questions.map((q, index) => ({
+    questionId: q._id,
+    sequenceNumber: index + 1,
+    questionText: q.questionText,
+    options: q.options.map(opt => ({
+      optionKey: opt.optionKey,
+      optionText: opt.optionText
+    })),
+    selectedOption: null,
+    isFlagged: false,
+    secondsSpent: 0
+  }));
 };
 
 /**
@@ -20,7 +46,6 @@ exports.startExam = async (req, res) => {
     const { organizationId, id: userId } = req.user;
     const { sessionId, accessPin } = req.body;
 
-    // A. Validate Active Session
     const session = await ExamSession.findOne({ 
       _id: sessionId, 
       organizationId 
@@ -48,36 +73,14 @@ exports.startExam = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Linked exam configuration blueprint is missing.' });
     }
 
-    // B. Fetch Questions & Build Frozen Snapshots
-    const questions = await Question.find({
-      organizationId,
-      subject: config.subject,
-      examType: config.examType,
-      paperType: config.paperType,
-      status: 'APPROVED'
-    }).limit(config.totalQuestions);
-
-    if (questions.length === 0) {
+    const questionSnapshots = await generateSnapshots(organizationId, config);
+    if (questionSnapshots.length === 0) {
       return res.status(400).json({ 
         success: false, 
         error: `Insufficient approved questions found for ${config.subject} (${config.examType}).` 
       });
     }
 
-    const questionSnapshots = questions.map((q, index) => ({
-      questionId: q._id,
-      sequenceNumber: index + 1,
-      questionText: q.questionText,
-      options: q.options.map(opt => ({
-        optionKey: opt.optionKey,
-        optionText: opt.optionText
-      })),
-      selectedOption: null,
-      isFlagged: false,
-      secondsSpent: 0
-    }));
-
-    // C. Check Existing Attempts (Resume or Block)
     const existingAttempts = await Exam.find({ 
       sessionId: session._id, 
       userId, 
@@ -86,7 +89,6 @@ exports.startExam = async (req, res) => {
 
     const activeAttempt = existingAttempts.find(exp => exp.status === 'active');
     
-    // Resume existing active attempt
     if (activeAttempt) {
       if (activeAttempt.expiresAt && new Date() >= new Date(activeAttempt.expiresAt)) {
         activeAttempt.status = 'expired';
@@ -94,7 +96,6 @@ exports.startExam = async (req, res) => {
         return res.status(403).json({ success: false, error: 'Exam time expired while you were away.' });
       }
 
-      // Self-heal: ensure questions payload exists on doc
       let activeList = getQuestionsList(activeAttempt);
       if (activeList.length === 0) {
         activeAttempt.questions = questionSnapshots;
@@ -111,18 +112,15 @@ exports.startExam = async (req, res) => {
       });
     }
 
-    // Enforce Max Attempts Limit
     const completedAttempts = existingAttempts.filter(exp => ['submitted', 'expired'].includes(exp.status));
     if (completedAttempts.length >= (config.maxAttempts || 1)) {
       return res.status(403).json({ success: false, error: 'Maximum allowed attempt limit reached for this exam.' });
     }
 
-    // D. Compute Timestamps
     const startTime = new Date();
     const durationMinutes = config.durationValue || 60;
     const expiresAt = new Date(startTime.getTime() + durationMinutes * 60 * 1000);
 
-    // E. Save New Exam Attempt (Map all standard array keys to match your schema definition)
     const attempt = await Exam.create({
       organizationId,
       userId,
@@ -173,7 +171,21 @@ exports.submitAnswer = async (req, res) => {
       return res.status(403).json({ success: false, error: 'Time limit exceeded. Exam expired.' });
     }
 
-    const questionsList = getQuestionsList(attempt);
+    let questionsList = getQuestionsList(attempt);
+
+    // Auto-repair if attempt record was created with empty questions
+    if (questionsList.length === 0) {
+      const session = await ExamSession.findOne({ _id: attempt.sessionId, organizationId }).populate('examConfigId');
+      if (session && session.examConfigId) {
+        const questionSnapshots = await generateSnapshots(organizationId, session.examConfigId);
+        attempt.questions = questionSnapshots;
+        attempt.questionSnapshots = questionSnapshots;
+        attempt.answers = questionSnapshots;
+        await attempt.save();
+        questionsList = getQuestionsList(attempt);
+      }
+    }
+
     if (questionsList.length === 0) {
       return res.status(400).json({ success: false, error: 'No questions registered for this exam attempt.' });
     }
@@ -237,7 +249,19 @@ exports.submitExam = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Exam has already been submitted.' });
     }
 
-    const questionsList = getQuestionsList(attempt);
+    let questionsList = getQuestionsList(attempt);
+    if (questionsList.length === 0 && attempt.sessionId) {
+      const session = await ExamSession.findOne({ _id: attempt.sessionId, organizationId }).populate('examConfigId');
+      if (session && session.examConfigId) {
+        const questionSnapshots = await generateSnapshots(organizationId, session.examConfigId);
+        attempt.questions = questionSnapshots;
+        attempt.questionSnapshots = questionSnapshots;
+        attempt.answers = questionSnapshots;
+        await attempt.save();
+        questionsList = getQuestionsList(attempt);
+      }
+    }
+
     const questionIds = questionsList.map(q => q.questionId || q._id);
     const masterQuestions = await Question.find({ _id: { $in: questionIds } });
     const questionMap = new Map(masterQuestions.map(q => [q._id.toString(), q]));
