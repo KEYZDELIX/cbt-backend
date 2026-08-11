@@ -44,6 +44,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/organizations', organizationRoutes);
 app.use('/api/exam-configs', require('./routes/examConfigRoutes'));
 app.use('/api/exams', examRoutes);
+app.use('/api/exam-sessions', require('./routes/examSessionRoutes'));
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/proctor', proctorRoutes);
