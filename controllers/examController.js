@@ -9,7 +9,7 @@ const Question = require('../models/Question');
  */
 exports.startExam = async (req, res) => {
   try {
-    const { organizationId, id: candidateId } = req.user;
+    const { organizationId, id: userId } = req.user;
     const { sessionId, accessPin } = req.body;
 
     // A. Validate Active Session
@@ -43,17 +43,16 @@ exports.startExam = async (req, res) => {
     // B. Check Existing Attempts (Resume or Block)
     const existingAttempts = await Exam.find({ 
       sessionId: session._id, 
-      candidateId, 
+      userId, 
       organizationId 
     });
 
-    const activeAttempt = existingAttempts.find(exp => exp.status === 'IN_PROGRESS');
+    const activeAttempt = existingAttempts.find(exp => exp.status === 'active');
     
     // Resume existing active attempt
     if (activeAttempt) {
-      // Check if time expired while disconnected
-      if (new Date() >= new Date(activeAttempt.expiresAt)) {
-        activeAttempt.status = 'EXPIRED';
+      if (activeAttempt.expiresAt && new Date() >= new Date(activeAttempt.expiresAt)) {
+        activeAttempt.status = 'expired';
         await activeAttempt.save();
         return res.status(403).json({ success: false, error: 'Exam time expired while you were away.' });
       }
@@ -67,7 +66,7 @@ exports.startExam = async (req, res) => {
     }
 
     // Enforce Max Attempts Limit
-    const completedAttempts = existingAttempts.filter(exp => ['SUBMITTED', 'EXPIRED'].includes(exp.status));
+    const completedAttempts = existingAttempts.filter(exp => ['submitted', 'expired'].includes(exp.status));
     if (completedAttempts.length >= (config.maxAttempts || 1)) {
       return res.status(403).json({ success: false, error: 'Maximum allowed attempt limit reached for this exam.' });
     }
@@ -88,7 +87,6 @@ exports.startExam = async (req, res) => {
       });
     }
 
-    // Build candidate question snapshot (stripping correct answers and explanations for security)
     const questionSnapshots = questions.map((q, index) => ({
       questionId: q._id,
       sequenceNumber: index + 1,
@@ -110,13 +108,13 @@ exports.startExam = async (req, res) => {
     // E. Save New Exam Attempt
     const attempt = await Exam.create({
       organizationId,
-      candidateId,
+      userId,
       sessionId: session._id,
       examConfigId: config._id,
       questions: questionSnapshots,
       startTime,
       expiresAt,
-      status: 'IN_PROGRESS'
+      status: 'active'
     });
 
     res.status(201).json({
@@ -136,34 +134,31 @@ exports.startExam = async (req, res) => {
  */
 exports.submitAnswer = async (req, res) => {
   try {
-    const { organizationId, id: candidateId } = req.user;
+    const { organizationId, id: userId } = req.user;
     const { examId } = req.params;
     const { questionId, selectedOption, isFlagged, secondsSpent } = req.body;
 
-    const attempt = await Exam.findOne({ _id: examId, candidateId, organizationId });
+    const attempt = await Exam.findOne({ _id: examId, userId, organizationId });
 
     if (!attempt) {
       return res.status(404).json({ success: false, error: 'Exam attempt not found.' });
     }
 
-    if (attempt.status !== 'IN_PROGRESS') {
+    if (attempt.status !== 'active') {
       return res.status(400).json({ success: false, error: 'Exam attempt is no longer active.' });
     }
 
-    // Timer check
-    if (new Date() > new Date(attempt.expiresAt)) {
-      attempt.status = 'EXPIRED';
+    if (attempt.expiresAt && new Date() > new Date(attempt.expiresAt)) {
+      attempt.status = 'expired';
       await attempt.save();
       return res.status(403).json({ success: false, error: 'Time limit exceeded. Exam expired.' });
     }
 
-    // Find question inside stored candidate snapshot
     const qIndex = attempt.questions.findIndex(q => q.questionId.toString() === questionId);
     if (qIndex === -1) {
       return res.status(404).json({ success: false, error: 'Question not found in this exam attempt.' });
     }
 
-    // Update state
     if (selectedOption !== undefined) {
       attempt.questions[qIndex].selectedOption = selectedOption;
     }
@@ -196,21 +191,20 @@ exports.submitAnswer = async (req, res) => {
  */
 exports.submitExam = async (req, res) => {
   try {
-    const { organizationId, id: candidateId } = req.user;
+    const { organizationId, id: userId } = req.user;
     const { examId } = req.params;
 
-    const attempt = await Exam.findOne({ _id: examId, candidateId, organizationId })
+    const attempt = await Exam.findOne({ _id: examId, userId, organizationId })
       .populate('examConfigId');
 
     if (!attempt) {
       return res.status(404).json({ success: false, error: 'Exam attempt not found.' });
     }
 
-    if (attempt.status === 'SUBMITTED') {
+    if (attempt.status === 'submitted') {
       return res.status(400).json({ success: false, error: 'Exam has already been submitted.' });
     }
 
-    // Collect Question IDs to pull official answer keys from Question Bank
     const questionIds = attempt.questions.map(q => q.questionId);
     const masterQuestions = await Question.find({ _id: { $in: questionIds } });
     const questionMap = new Map(masterQuestions.map(q => [q._id.toString(), q]));
@@ -220,7 +214,6 @@ exports.submitExam = async (req, res) => {
     let totalWrong = 0;
     let totalUnanswered = 0;
 
-    // Grade each question
     attempt.questions.forEach(snapshot => {
       const originalQuestion = questionMap.get(snapshot.questionId.toString());
 
@@ -237,8 +230,7 @@ exports.submitExam = async (req, res) => {
     const totalQuestions = attempt.questions.length;
     const percentage = totalQuestions > 0 ? parseFloat(((totalCorrect / totalQuestions) * 100).toFixed(2)) : 0;
 
-    // Finalize attempt details
-    attempt.status = 'SUBMITTED';
+    attempt.status = 'submitted';
     attempt.submittedAt = new Date();
     attempt.score = totalScore;
     attempt.metrics = {
@@ -273,8 +265,8 @@ exports.submitExam = async (req, res) => {
  */
 exports.getExamById = async (req, res) => {
   try {
-    const { organizationId, id: candidateId } = req.user;
-    const attempt = await Exam.findOne({ _id: req.params.examId, candidateId, organizationId })
+    const { organizationId, id: userId } = req.user;
+    const attempt = await Exam.findOne({ _id: req.params.examId, userId, organizationId })
       .populate('examConfigId', 'title subject examType paperType durationValue');
 
     if (!attempt) {
