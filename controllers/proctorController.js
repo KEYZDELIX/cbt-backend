@@ -1,6 +1,6 @@
 const ExamSession = require('../models/ExamSession');
 
-// 1. Get real-time active exam sessions in center / online hall
+// 1. Get real-time active exam sessions
 exports.getLiveSessions = async (req, res) => {
   try {
     const organizationId = req.organizationId || req.user?.organizationId;
@@ -25,7 +25,7 @@ exports.getLiveSessions = async (req, res) => {
   }
 };
 
-// 2. Manually terminate a candidate session for malpractice
+// 2. Manually terminate candidate session
 exports.terminateCandidateSession = async (req, res) => {
   try {
     const { id } = req.params;
@@ -58,7 +58,7 @@ exports.terminateCandidateSession = async (req, res) => {
   }
 };
 
-// 3. Log a proctor violation warning (tab switch, noise flag, multi-face detect)
+// 3. Log a proctor violation warning
 exports.flagViolation = async (req, res) => {
   try {
     const { id } = req.params;
@@ -98,7 +98,7 @@ exports.flagViolation = async (req, res) => {
   }
 };
 
-// 4. Verify candidate passport / biometric match before test unlock
+// 4. Verify candidate identity
 exports.verifyCandidateIdentity = async (req, res) => {
   try {
     const { candidateId, examId, verified } = req.body;
