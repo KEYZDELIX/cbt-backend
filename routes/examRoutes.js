@@ -5,27 +5,39 @@ const auth = require('../middleware/auth');
 const authorize = require('../middleware/rbac');
 const tenantContext = require('../middleware/tenantContext');
 
+const examController = require('../controllers/examController');
+
 router.use(auth);
 router.use(tenantContext);
 
-// List all cohorts/groups in organization
-router.get('/', authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER', 'INSTRUCTOR'), (req, res) => {
-  res.status(200).json({ message: 'Get cohorts endpoint active' });
-});
+router.get(
+  '/',
+  authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER', 'INSTRUCTOR', 'CANDIDATE'),
+  examController.getExams
+);
 
-// Create new cohort
-router.post('/', authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER'), (req, res) => {
-  res.status(200).json({ message: 'Create cohort endpoint active' });
-});
+router.post(
+  '/',
+  authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER', 'INSTRUCTOR'),
+  examController.createExam
+);
 
-// Get cohort by ID
-router.get('/:id', authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER', 'INSTRUCTOR'), (req, res) => {
-  res.status(200).json({ message: 'Get cohort details endpoint active' });
-});
+router.get(
+  '/:id',
+  authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER', 'INSTRUCTOR', 'CANDIDATE'),
+  examController.getExamById
+);
 
-// Delete cohort
-router.delete('/:id', authorize('SUPER_ADMIN', 'ORG_ADMIN'), (req, res) => {
-  res.status(200).json({ message: 'Delete cohort endpoint active' });
-});
+router.put(
+  '/:id',
+  authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER'),
+  examController.updateExam
+);
+
+router.delete(
+  '/:id',
+  authorize('SUPER_ADMIN', 'ORG_ADMIN'),
+  examController.deleteExam
+);
 
 module.exports = router;
