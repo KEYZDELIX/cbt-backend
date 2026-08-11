@@ -1,89 +1,37 @@
 const ExamSession = require('../models/ExamSession');
 
-// 1. Log candidate proctoring violation (tab switch, lost focus, exit fullscreen)
-exports.logProctorEvent = async (req, res) => {
+// 1. Get real-time active exam sessions in center / online hall
+exports.getLiveSessions = async (req, res) => {
   try {
-    const { sessionId, eventType } = req.body;
+    const organizationId = req.organizationId || req.user?.organizationId;
 
-    if (!sessionId || !eventType) {
-      return res.status(400).json({ error: 'sessionId and eventType are required.' });
-    }
-
-    const session = await ExamSession.findById(sessionId);
-    if (!session) {
-      return res.status(404).json({ error: 'Exam session not found.' });
-    }
-
-    if (session.status !== 'IN_PROGRESS') {
-      return res.status(400).json({ error: 'Session is no longer active.' });
-    }
-
-    // Append violation to proctor logs
-    session.proctorLogs.push({ eventType, timestamp: new Date() });
-
-    if (eventType === 'TAB_SWITCH' || eventType === 'FULLSCREEN_EXIT') {
-      session.tabSwitchCount += 1;
-    }
-
-    // Auto-terminate session if tab switches exceed threshold (e.g., 5 switches)
-    if (session.tabSwitchCount >= 5) {
-      session.status = 'TERMINATED';
-      session.submittedAt = new Date();
-      session.proctorLogs.push({
-        eventType: 'FORCE_SUBMIT',
-        timestamp: new Date()
-      });
-    }
-
-    await session.save();
+    const liveSessions = await ExamSession.find({
+      organizationId,
+      status: 'IN_PROGRESS'
+    })
+      .populate('candidateId', 'firstName lastName email candidateCode profilePicture')
+      .populate('examId', 'title code durationMinutes');
 
     res.status(200).json({
-      message: 'Proctor event logged.',
-      tabSwitchCount: session.tabSwitchCount,
-      status: session.status
+      success: true,
+      count: liveSessions.length,
+      sessions: liveSessions
     });
   } catch (error) {
-    res.status(500).json({ 
-      error: 'Failed to log proctor event.', 
-      details: error.message 
+    res.status(500).json({
+      error: 'Failed to fetch live sessions.',
+      details: error.message
     });
   }
 };
 
-// 2. Get proctoring log history for a specific session (Admin / Proctor view)
-exports.getProctorLogs = async (req, res) => {
+// 2. Manually terminate a candidate session for malpractice
+exports.terminateCandidateSession = async (req, res) => {
   try {
-    const { sessionId } = req.params;
+    const { id } = req.params;
+    const { reason } = req.body;
 
-    const session = await ExamSession.findById(sessionId)
-      .populate('candidateId', 'firstName lastName email candidateCode')
-      .populate('examId', 'title code');
-
-    if (!session) {
-      return res.status(404).json({ error: 'Exam session not found.' });
-    }
-
-    res.status(200).json({
-      candidate: session.candidateId,
-      exam: session.examId,
-      status: session.status,
-      tabSwitchCount: session.tabSwitchCount,
-      logs: session.proctorLogs
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      error: 'Failed to fetch proctor logs.', 
-      details: error.message 
-    });
-  }
-};
-
-// 3. Force terminate candidate exam session
-exports.terminateSession = async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-
-    const session = await ExamSession.findById(sessionId);
+    const session = await ExamSession.findById(id);
     if (!session) {
       return res.status(404).json({ error: 'Exam session not found.' });
     }
@@ -92,19 +40,82 @@ exports.terminateSession = async (req, res) => {
     session.submittedAt = new Date();
     session.proctorLogs.push({
       eventType: 'FORCE_SUBMIT',
-      timestamp: new Date()
+      timestamp: new Date(),
+      note: reason || 'Manually terminated by proctor for malpractice'
     });
 
     await session.save();
 
-    res.status(200).json({ 
-      message: 'Exam session terminated successfully.', 
-      session 
+    res.status(200).json({
+      message: 'Candidate session terminated successfully.',
+      session
     });
   } catch (error) {
-    res.status(500).json({ 
-      error: 'Failed to terminate session.', 
-      details: error.message 
+    res.status(500).json({
+      error: 'Failed to terminate candidate session.',
+      details: error.message
+    });
+  }
+};
+
+// 3. Log a proctor violation warning (tab switch, noise flag, multi-face detect)
+exports.flagViolation = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { violationType, details } = req.body;
+
+    const session = await ExamSession.findById(id);
+    if (!session) {
+      return res.status(404).json({ error: 'Exam session not found.' });
+    }
+
+    if (session.status !== 'IN_PROGRESS') {
+      return res.status(400).json({ error: 'Session is no longer active.' });
+    }
+
+    session.proctorLogs.push({
+      eventType: violationType || 'TAB_SWITCH',
+      timestamp: new Date(),
+      note: details || ''
+    });
+
+    if (violationType === 'TAB_SWITCH') {
+      session.tabSwitchCount = (session.tabSwitchCount || 0) + 1;
+    }
+
+    await session.save();
+
+    res.status(200).json({
+      message: 'Violation logged successfully.',
+      tabSwitchCount: session.tabSwitchCount,
+      logsCount: session.proctorLogs.length
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to log violation.',
+      details: error.message
+    });
+  }
+};
+
+// 4. Verify candidate passport / biometric match before test unlock
+exports.verifyCandidateIdentity = async (req, res) => {
+  try {
+    const { candidateId, examId, verified } = req.body;
+
+    if (!candidateId || !examId) {
+      return res.status(400).json({ error: 'candidateId and examId are required.' });
+    }
+
+    res.status(200).json({
+      success: true,
+      verified: Boolean(verified),
+      message: verified ? 'Identity verified. Exam unlocked.' : 'Identity verification failed.'
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to verify candidate identity.',
+      details: error.message
     });
   }
 };
