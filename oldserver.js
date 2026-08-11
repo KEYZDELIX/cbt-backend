@@ -1,0 +1,1883 @@
+// ================= BACKEND: server.js =================
+require('dotenv').config();
+const express = require('express');
+const router = express.Router();
+const mongoose = require('mongoose');
+const cors = require('cors');
+const cloudinary = require('cloudinary').v2;
+const multer = require('multer');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const nodemailer = require('nodemailer');
+
+// 1. Configure Cloudinary
+cloudinary.config({
+    cloud_name: process.env.CLOUDY_NAME,
+    api_key: process.env.CLOUDY_KEY,
+    api_secret: process.env.CLOUDY_SECRET
+});
+
+console.log("Cloudinary Configured:", process.env.CLOUDY_NAME ? "YES" : "NO");
+
+
+// 2. Set up the Storage Engine
+const storage = new CloudinaryStorage({
+    cloudinary: cloudinary,
+    params: {
+        folder: 'quiz_images', // Folder name in Cloudinary
+        allowed_formats: ['jpg', 'png', 'jpeg', 'webp'],
+        transformation: [{ width: 1000, crop: "limit" }] // Auto-resize for efficiency
+    },
+});
+const upload = multer({ storage: storage });
+
+// Initialize Transporter using Environment Variables
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true, // Use SSL
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS // The 16-character App Password
+    },
+    tls: {
+        rejectUnauthorized: false // Helps prevent connection drops on some servers
+    }
+});
+
+
+// FORCE IPv4: Add this block right after your transporter definition
+//const dns = require('dns');
+//dns.setDefaultResultOrder('ipv4first'); 
+
+// Verification Check
+transporter.verify((error, success) => {
+    if (error) {
+        console.log("❌ Email Connection Error:", error);
+    } else {
+        console.log("✅ Email Server is ready (Savvy Scholars)");
+    }
+});
+
+
+
+// Models
+const Question = require('./models/Question');
+const Result = require('./models/Result');
+const User = require('./models/User');
+const Exam = require('./models/Exam');
+const ExamConfig = require('./models/ExamConfig');
+const seedSystem = require('./utils/seedSystem');
+const bcrypt = require('bcryptjs'); // Highly recommended for password security
+const {runNormalization} = require('./utils/scoring');
+
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+const PORT = process.env.PORT || 5000;
+
+
+
+
+mongoose.connect(process.env.MONGO_URI)
+  .then(async () => {
+    console.log('🔥 MongoDB connected');
+
+    // Runs the copy logic as soon as the DB is ready
+    //await runOneTimeMigration(); 
+
+    // Seed system user and host org if missing
+    await seedSystem();
+
+    // Once migration is done, start the server
+    app.listen(PORT, () => {
+      console.log(`🚀 Server is running on port ${PORT}`);
+    });
+  })	
+  .catch(err => {
+    console.error('❌ Connection error:', err);
+    process.exit(1); // Exit if DB connection fails
+  });
+  
+  // GET: Check if the mailer is alive
+app.get('/api/test-email-connection', async (req, res) => {
+    try {
+        await transporter.verify();
+        res.json({ 
+            status: "Online", 
+            message: "Connected to Savvy Scholars Gmail Engine",
+            user: process.env.EMAIL_USER 
+        });
+    } catch (err) {
+        res.status(500).json({ 
+            status: "Offline", 
+            error: err.message 
+        });
+    }
+});
+
+// --- ADMIN ROUTES ---
+
+// --- REGISTER NEW USER ---
+app.post('/admin/register-user', async (req, res) => {
+    try {
+        const { 
+            firstName, middleName, lastName, gender, 
+            email, phone, courseOfStudy, classLevel, 
+            password, subjects, examType, department 
+        } = req.body;
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        // Auto-generate Reg Number (Original Format: SST26 + 4 digits + 2 letters)
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        const randomLetters = chars[Math.floor(Math.random() * 26)] + chars[Math.floor(Math.random() * 26)];
+        const regNumber = `SST26${Math.floor(1000 + Math.random() * 9000)}${randomLetters}`.toUpperCase();
+        
+        // Subject Logic: Add English for JAMB, empty array for WAEC
+        const finalSubjects = examType === 'JAMB' ? ['Use of English', ...subjects] : [];
+
+        const newUser = new User({
+            firstName, middleName, lastName, gender,
+            email, phone, courseOfStudy, classLevel,
+            password: hashedPassword,
+            plainPassword: password, 
+            examType, 
+            department: examType === 'WAEC' ? department : 'N/A',
+            regNo: regNumber,
+            subjectCombination: finalSubjects
+        });
+
+        await newUser.save();
+        
+        res.json({ 
+            success: true, 
+            regNumber: newUser.regNo, 
+            password: password, 
+            user: newUser
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- UPDATE USER ---
+app.put('/admin/users/:id', async (req, res) => {
+    try {
+        const { password, subjects, examType, ...otherData } = req.body;
+        const updatePayload = { ...otherData, examType };
+
+        // 1. Password update logic
+        if (password && password.trim() !== "") {
+            const salt = await bcrypt.genSalt(10);
+            updatePayload.password = await bcrypt.hash(password, salt);
+            updatePayload.plainPassword = password;
+        }
+        
+        // 2. Ensure RegNo exists (fallback)
+        const existingUser = await User.findById(req.params.id);
+        if (!existingUser.regNo) {
+            const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            const randomLetters = chars[Math.floor(Math.random() * 26)] + chars[Math.floor(Math.random() * 26)];
+            updatePayload.regNo = `SST26${Math.floor(1000 + Math.random() * 9000)}${randomLetters}`.toUpperCase();
+        }
+
+        // 3. Re-process subjects based on Exam Type
+        if (examType === 'JAMB' && subjects) {
+            updatePayload.subjectCombination = subjects.includes('Use of English') 
+                ? subjects 
+                : ['Use of English', ...subjects];
+        } else if (examType === 'WAEC') {
+            updatePayload.subjectCombination = [];
+        }
+
+        const updatedUser = await User.findByIdAndUpdate(
+            req.params.id, 
+            { $set: updatePayload }, 
+            { new: true }
+        );
+
+        res.json({ 
+            success: true, 
+            regNumber: updatedUser.regNo, 
+            password: password || updatedUser.plainPassword,
+            user: updatedUser 
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- GET USERS (With Pagination - Matches Load Questions) ---
+app.get('/admin/users', async (req, res) => {
+    try {
+        const { search, level, gender, course, page = 1, limit = 50 } = req.query;
+        let query = {};
+
+        if (search) {
+            query.$or = [
+                { firstName: { $regex: search, $options: 'i' } },
+                { lastName: { $regex: search, $options: 'i' } },
+                { regNo: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        if (level) query.classLevel = level;
+        if (gender) query.gender = gender;
+        if (course) query.courseOfStudy = { $regex: course, $options: 'i' };
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        
+        const users = await User.find(query)
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(parseInt(limit));
+
+        const total = await User.countDocuments(query);
+
+        res.json({ 
+            success: true, 
+            users, 
+            total, // Total matching records
+            count: total, // Keeping 'count' for your existing badge logic
+            pages: Math.ceil(total / limit),
+            currentPage: parseInt(page)
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Delete a user
+app.delete('/admin/users/:id', async (req, res) => {
+    try {
+        await User.findByIdAndDelete(req.params.id);
+        res.json({ success: true, message: "User deleted successfully" });
+    } catch (err) {
+        res.status(500).json({ error: "Delete failed" });
+    }
+});
+
+
+/**
+ * 1. ADD NEW QUESTION
+ * Updated to handle Theory subQuestions and Explanation fields.
+ */
+app.post('/questions', async (req, res) => {
+    try {
+        console.log("Saving Data:", req.body);
+        const questionData = req.body;
+        
+        // Safety: Ensure subQuestions is an array if present
+        if (questionData.subQuestions && typeof questionData.subQuestions === 'string') {
+            questionData.subQuestions = JSON.parse(questionData.subQuestions);
+        }
+        
+        // Admin Tracking Defaults
+        if (!questionData.createdBy) questionData.createdBy = "KeyzDelix";
+
+        // ENSURE DATA INTEGRITY
+        // If it's a Theory paper, ensure options are empty to prevent front-end "leakage"
+        if (questionData.paperType !== 'OBJ') {
+            questionData.options = [];
+            questionData.correctOptionKey = "";
+        }
+
+        const newQuestion = new Question(questionData);
+        await newQuestion.save();
+
+        const { examType, subject, subTopic, subSubTopic, passage, instruction, paperType } = questionData;
+
+        // --- SYNC LOGIC: PASSAGES (Only for English) ---
+        if (subject.includes("English") && subSubTopic && passage) {
+            await Question.updateMany(
+                { examType, subject, subSubTopic },
+                { $set: { passage: passage } }
+            );
+        }
+
+        // --- SYNC LOGIC: INSTRUCTIONS ---
+        // Added paperType to the filter so Objective instructions don't 
+        // overwrite Theory marking guides accidentally.
+        if (subTopic && instruction) {
+            await Question.updateMany(
+                { examType, subject, subTopic, paperType }, 
+                { $set: { instruction: instruction } }
+            );
+        }
+
+        res.json({ success: true, id: newQuestion._id });
+    } catch (err) {
+        console.error("Add Question Error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+/**
+ * 2. GET ALL QUESTIONS
+ * Fetches all questions, sorted so the most recently touched are at the top.
+ */
+app.get('/questions', async (req, res) => {
+    try {
+        const questions = await Question.find().sort({ updatedAt: -1 });
+        res.json(questions);
+    } catch (err) {
+        res.status(500).json({ error: "Could not fetch questions: " + err.message });
+    }
+});
+
+/**
+ * 3. GET SINGLE QUESTION
+ */
+app.get('/questions/:id', async (req, res) => {
+    try {
+        const question = await Question.findById(req.params.id);
+        if (!question) return res.status(404).json({ error: "Question not found" });
+        res.json(question);
+    } catch (err) {
+        res.status(500).json({ error: "Fetch error" });
+    }
+});
+
+/**
+ * 4. UPDATE EXISTING QUESTION
+ * Replicates changes while protecting paperType-specific content.
+ */
+app.put('/questions/:id', async (req, res) => {
+    try {
+        const questionData = req.body;
+        questionData.updatedBy = questionData.updatedBy || "KeyzDelix";
+
+        // If switching paperType via edit, we need to clear irrelevant fields
+        if (questionData.paperType === 'OBJ') {
+            questionData.subQuestions = []; // Clear theory parts
+        } else {
+            questionData.options = []; // Clear OBJ options
+        }
+
+        const updatedQuestion = await Question.findByIdAndUpdate(
+            req.params.id,
+            questionData,
+            { new: true }
+        );
+
+        if (!updatedQuestion) return res.status(404).json({ error: "Question not found" });
+
+        const { examType, subject, subTopic, subSubTopic, passage, instruction, paperType } = updatedQuestion;
+
+        // --- SYNC LOGIC: PASSAGES ---
+        if (subject.includes("English") && subSubTopic && passage) {
+            await Question.updateMany(
+                { 
+                    _id: { $ne: req.params.id }, 
+                    examType, subject, subSubTopic 
+                },
+                { $set: { passage: passage } }
+            );
+        }
+
+        // --- SYNC LOGIC: INSTRUCTIONS ---
+        // Syncing within the same Paper Type to maintain context
+        if (subTopic && instruction) {
+            await Question.updateMany(
+                { 
+                    _id: { $ne: req.params.id },
+                    examType, subject, subTopic, paperType 
+                },
+                { $set: { instruction: instruction } }
+            );
+        }
+
+        res.json({ success: true, data: updatedQuestion });
+    } catch (err) {
+        console.error("Update Error:", err);
+        res.status(500).json({ error: "Update failed: " + err.message });
+    }
+});
+
+/**
+ * 5. DELETE QUESTION
+ */
+app.delete('/questions/:id', async (req, res) => {
+    try {
+        const deleted = await Question.findByIdAndDelete(req.params.id);
+        if (!deleted) return res.status(404).json({ error: "Question already deleted" });
+        res.json({ success: true, message: "Question removed" });
+    } catch (err) {
+        res.status(500).json({ error: "Delete failed" });
+    }
+});
+
+app.post('/api/upload', upload.single('image'), (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+        
+        // Cloudinary returns the secure URL in req.file.path
+        console.log("File uploaded to Cloudinary:", req.file.path);
+        res.json({ url: req.file.path });
+    } catch (err) {
+        console.error("Cloudinary Upload Error:", err);
+        res.status(500).json({ error: 'Internal Server Error during upload' });
+    }
+});
+
+
+
+// Optimized View Script: Shows ONLY questions the student answered
+
+app.get('/admin/view-script/:resultId/:subject', async (req, res) => {
+    try {
+        const { resultId, subject } = req.params;
+        
+        // 1. Get the Result document
+        const result = await Result.findById(resultId);
+        if (!result) return res.status(404).json({ error: "Result not found" });
+
+        // 2. Locate the student session using the new Dual-ID logic
+        // We look for a session matching the user AND either the blueprint OR the session ID
+        const session = await Exam.findOne({ 
+            userId: result.userId, 
+            $or: [
+                { _id: result.examSessionId }, // Match specific session
+                { examId: result.examId }      // Fallback to blueprint ID
+            ]
+        });
+
+        if (!session) {
+            console.log(`Session not found for User: ${result.userId}, Exam: ${result.examId}`);
+            return res.status(404).json({ error: "Student answer session not found." });
+        }
+
+        // 3. Filter responses (Case-insensitive to be safe)
+        const responses = session.responses.filter(r => 
+            r.subject.toLowerCase() === subject.toLowerCase()
+        );
+        
+        // 4. Fetch Question details
+        const questionIds = responses.map(r => r.questionId);
+        const questions = await Question.find({ _id: { $in: questionIds } });
+
+        const getFullUrl = (path) => {
+            if (!path || path.startsWith('http')) return path;
+            return `${process.env.BASE_URL || 'http://localhost:5000'}/${path.replace(/^\//, '')}`;
+        };
+
+        // 5. Build the script review with corrected image paths
+        const script = responses.map(resp => {
+            const q = questions.find(doc => doc._id.toString() === resp.questionId.toString());
+            return {
+                questionText: q ? q.questionText : "Question data missing",
+                passage: q ? q.passage : "", 
+                questionImage: q ? getFullUrl(q.questionImage) : "",
+                options: q ? q.options.map(opt => ({
+                    key: opt.key,
+                    value: opt.value,
+                    image: getFullUrl(opt.optionImage || opt.image) // Support both field names
+                })) : [],
+                correctKey: q ? q.correctOptionKey : null,
+                selectedKey: resp.selectedOptionKey,
+                isCorrect: q ? (String(resp.selectedOptionKey).trim() === String(q.correctOptionKey).trim()) : false,
+                explanation: q ? q.explanation : ""
+            };
+        });
+
+        // 6. Get stats from subjectResults array using the same case-insensitive check
+        const subStats = result.subjectResults.find(s => 
+            s.subjectName.toLowerCase() === subject.toLowerCase()
+        ) || {};
+
+        res.json({
+            subject: subject.toUpperCase(),
+            stats: {
+                raw: subStats.rawScore2 || subStats.rawScore || 0,
+                weighted: subStats.weightedScore2 || subStats.weightedScore || 0,
+                normalized: subStats.normalizedScore2 || 0
+            },
+            questions: script
+        });
+
+    } catch (err) {
+        console.error("View Script Error:", err);
+        res.status(500).json({ error: "Server error retrieving review." });
+    }
+});
+
+
+
+
+// 7. Admin: View All Results
+app.get('/all-results', async (req, res) => {
+    try {
+        const results = await Result.find()
+            .populate('userId', 'firstName lastName middleName regNumber regNo gender examAllocations')
+            .sort({ preciseRankingScore: -1 });
+
+        const cleanedResults = results.map(r => {
+            const user = r.userId;
+            
+            // FIND THE RIGHT BATCH:
+            // Look through the student's allocations for the one that matches this Result's examId
+            let assignedBatch = "1"; // Default fallback
+            if (user && user.examAllocations) {
+                const matchingAllocation = user.examAllocations.find(alloc => 
+                    alloc.examId && alloc.examId.toString() === r.examId.toString()
+                );
+                if (matchingAllocation) {
+                    assignedBatch = matchingAllocation.batch || matchingAllocation.batchId || "1";
+                }
+            }
+
+            return {
+                _id: r._id,
+                examId: r.examId,
+                regNo: user?.regNumber || user?.regNo || "N/A",
+                studentName: `${user?.lastName || ''}, ${user?.firstName || ''} ${user?.middleName || ''}`.trim().toUpperCase(),
+                gender: user?.gender || "N/A",
+                // THIS IS THE KEY:
+                batchId: assignedBatch, 
+                aggregateScore: r.aggregateScore || 0,
+                preciseRankingScore: r.preciseRankingScore || 0,
+                examDate: r.examDate,
+                subjectResults: r.subjectResults || []
+            };
+        });
+
+        res.json(cleanedResults);
+    } catch (err) {
+        console.error("All-Results Error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+
+// GET ONE SPECIFIC RESULT (For PDF and Result Portal)
+
+app.get('/results/:id', async (req, res) => {
+    try {
+        const result = await Result.findById(req.params.id)
+            .populate('userId', 'firstName lastName middleName regNumber regNo gender');
+        
+        // Use examSessionId for the specific attempt data
+        const examSession = await Exam.findById(result.examSessionId || result.examId).lean(); 
+
+        // 1. Calculate Rank within this specific ExamConfig
+        const allResults = await Result.find({ examId: result.examId }).sort({ preciseRankingScore: -1 });
+        const rank = allResults.findIndex(r => r._id.toString() === result._id.toString()) + 1;
+        const totalCandidates = allResults.length;
+
+        const getFullUrl = (path) => {
+            if (!path || path.startsWith('http')) return path;
+            return `${process.env.BASE_URL || 'http://localhost:5000'}/${path.replace(/^\//, '')}`;
+        };
+
+        const detailedAnswers = [];
+        if (examSession?.responses) {
+            const questionIds = examSession.responses.map(r => r.questionId);
+            const questions = await mongoose.model('Question').find({ _id: { $in: questionIds } }).lean();
+
+            examSession.responses.forEach(resp => {
+                const q = questions.find(item => item._id.toString() === resp.questionId.toString());
+                if (q) {
+                    detailedAnswers.push({
+                        subject: resp.subject.toUpperCase(),
+                        passage: q.passage || null,
+                        questionText: q.questionText,
+                        questionImage: getFullUrl(q.questionImage),
+                        userChoice: resp.selectedOptionKey || "Skipped",
+                        correctKey: q.correctOptionKey,
+                        isCorrect: String(resp.selectedOptionKey).trim() === String(q.correctOptionKey).trim(),
+                        options: (q.options || []).map(opt => ({
+                            key: opt.key, 
+                            value: opt.value, 
+                            optionImage: getFullUrl(opt.optionImage)
+                        }))
+                    });
+                }
+            });
+        }
+
+        res.json({
+            fullName: `${result.userId?.firstName || ''} ${result.userId?.middleName || ''} ${result.userId?.lastName || ''}`.trim().toUpperCase(),
+            regNo: result.userId?.regNumber || result.userId?.regNo || "N/A",
+            gender: result.userId?.gender || "N/A",
+            examTitle: "JAMB STANDARD PERFORMANCE TRANSCRIPT",
+            examDate: result.examDate, // Date and Time
+            aggregateScore: result.aggregateScore,
+            preciseScore: result.preciseRankingScore,
+            rank: rank,
+            totalCandidates: totalCandidates,
+            timeTaken: result.timeTaken, // Total time in seconds
+            subjectScores: (result.subjectResults || []).map(s => ({
+                name: s.subjectName.toUpperCase(),
+                correct: s.correctCount,
+                total: s.totalQuestions,
+                score: s.normalizedScore2, // Use normalized score for the slip
+                timeSpent: examSession?.subjectAnalysis?.find(a => a.subjectName.toLowerCase() === s.subjectName.toLowerCase())?.secondsSpent || 0
+            })),
+            detailedAnswers
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+
+
+// Example Express Route
+app.get('/api/topics', async (req, res) => {
+    try {
+        const { subject } = req.query;
+        // Find all questions for this subject and return unique topic names
+        const topics = await Question.distinct('topic', { subject: subject });
+        res.json(topics);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch topics" });
+    }
+});
+
+//Merger
+app.post('/api/topics/merge', async (req, res) => {
+    const { subject, oldTopic, newTopic } = req.body;
+    try {
+        const result = await Question.updateMany(
+            { subject: subject, topic: oldTopic },
+            { $set: { topic: newTopic } }
+        );
+        res.json({ message: "Success", modifiedCount: result.modifiedCount });
+    } catch (err) {
+        res.status(500).json({ error: "Merge failed" });
+    }
+});
+app.get('/api/topics/stats', async (req, res) => {
+    try {
+        const { subject } = req.query;
+        const stats = await Question.aggregate([
+            { $match: { subject: subject } }, // Filter by subject (e.g., Physics)
+            { $group: { _id: "$topic", count: { $sum: 1 } } }, // Group by topic name
+            { $sort: { count: 1 } } // Sort from fewest to most questions
+        ]);
+        res.json(stats);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch analytics" });
+    }
+});
+// GET TOPIC INFO: Returns count for a specific topic or list for subject
+app.get('/api/topics/info', async (req, res) => {
+    try {
+        const { subject, topic } = req.query;
+        if (topic) {
+            // If a topic is provided, just return the count for that one
+            const count = await Question.countDocuments({ subject, topic });
+            return res.json({ count });
+        }
+        // Otherwise, return the distinct list of topics for the subject
+        const topics = await Question.distinct('topic', { subject });
+        res.json(topics);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch topic data" });
+    }
+});
+
+app.get('/api/subsubtopics', async (req, res) => {
+    try {
+        const { subject, name } = req.query;
+        // Find if any question already uses this subSubTopic
+        const existing = await Question.findOne({ subject, subSubTopic: name });
+        
+        if (existing) {
+            res.json({ exists: true, passage: existing.passage });
+        } else {
+            res.json({ exists: false });
+        }
+    } catch (err) {
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
+// 1. GET ALL UNIQUE SUB-SUBTOPICS (For the Datalist)
+app.get('/api/topics/subsub', async (req, res) => {
+    try {
+        const { subTopic } = req.query;
+        // Returns unique passage names like "Passage 1", "The Life Changer", etc.
+        const subsubs = await Question.distinct('subSubTopic', { 
+            subject: "Use of English", 
+            subTopic: subTopic 
+        });
+        res.json(subsubs.filter(s => s)); // Filter out empty strings
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch sub-subtopics" });
+    }
+});
+
+// 2. CHECK SPECIFIC SUB-SUBTOPIC (For Status & Auto-load Passage)
+app.get('/api/subsub/check', async (req, res) => {
+    try {
+        const { name } = req.query;
+        
+        // Count all questions sharing this passage name
+        const count = await Question.countDocuments({ 
+            subject: "Use of English", 
+            subSubTopic: name 
+        });
+        
+        const existing = await Question.findOne({ 
+            subject: "Use of English", 
+            subSubTopic: name 
+        });
+
+        res.json({
+            exists: count > 0,
+            count: count,
+            passage: existing ? existing.passage : ""
+        });
+    } catch (err) {
+        res.status(500).json({ error: "Server check failed" });
+    }
+});
+
+
+
+//--+-+ Manage Exam 
+// SAVE OR UPDATE EXAM CONFIGURATION
+app.post('/api/exams/save', async (req, res) => {
+    const { 
+        id, title, subject, examType, durationValue, 
+        timingMode, setGroupSize, 
+        perQuestionSeconds, perSetSeconds, // <--- ADDED
+        maxAttempts, shuffleType, selectionMode, shuffleSeed, 
+        totalQuestions, assignmentType, startDateTime, endDateTime, 
+        batchSettings, topicDistribution, otherSubjectsDist, // <--- ADDED
+        assignedStudents 
+    } = req.body;
+
+    const data = {
+        title,
+        subject: subject || 'General',
+        examType,
+        durationValue,
+        timingMode: timingMode || 'general',
+        setGroupSize: setGroupSize || 5,
+        perQuestionSeconds: perQuestionSeconds || 60, // <--- ADDED
+        perSetSeconds: perSetSeconds || 300,           // <--- ADDED
+        maxAttempts,
+        shuffleType,
+        selectionMode: selectionMode || 'static',
+        shuffleSeed: shuffleSeed || null,
+        totalQuestions,
+        assignmentType,
+        startDateTime,
+        endDateTime,
+        batchSettings,
+        topicDistribution,
+        otherSubjectsDist, // <--- ADDED
+        assignedStudents
+    };
+
+    try {
+        if (id) {
+            await ExamConfig.findByIdAndUpdate(id, data, { new: true });
+            res.json({ message: "Exam Engine Updated Successfully" });
+        } else {
+            const newEx = new ExamConfig(data);
+            await newEx.save();
+            res.json({ message: "New Exam Engine Created" });
+        }
+    } catch (err) {
+        console.error("Database Error:", err);
+        res.status(500).json({ error: "Failed to save: " + err.message });
+    }
+});
+
+// GET ALL EXAMS (Sorted by most recent)
+app.get('/api/exams', async (req, res) => {
+    try {
+        const { type } = req.query; // Get 'JAMB' or 'WAEC' from the URL
+        const filter = type ? { examType: type } : {}; 
+        
+        const exams = await ExamConfig.find(filter).sort({ createdAt: -1 });
+        res.json(exams);
+    } catch (err) {
+        res.status(500).json({ error: "Could not fetch exams" });
+    }
+});
+// DELETE EXAM
+app.delete('/api/exams/:id', async (req, res) => {
+    try {
+        const deleted = await ExamConfig.findByIdAndDelete(req.params.id);
+        if (!deleted) return res.status(404).json({ error: "Exam already deleted or not found" });
+        res.json({ message: "Exam deleted successfully" });
+    } catch (err) {
+        res.status(500).json({ error: "Delete operation failed" });
+    }
+});
+
+
+
+// SEARCH USERS (First, Middle, Last)
+app.get('/api/students/search', async (req, res) => {
+    try {
+        const q = req.query.q;
+        const users = await User.find({
+            $or: [
+                { firstName: { $regex: q, $options: 'i' } },
+                { middleName: { $regex: q, $options: 'i' } },
+                { lastName: { $regex: q, $options: 'i' } },
+                { regNo: { $regex: q, $options: 'i' } }
+            ]
+        }).limit(10);
+
+        // Format the names for the frontend dropdown
+        const formattedUsers = users.map(u => ({
+            regNo: u.regNo,
+            fullName: `${u.firstName} ${u.middleName} ${u.lastName}`,
+            classLevel: u.classLevel
+        }));
+
+        res.json(formattedUsers);
+    } catch (err) {
+        res.status(500).json([]);
+    }
+});
+
+// GROUP USERS (Using classLevel)
+app.get('/api/students/by-group', async (req, res) => {
+    try {
+        const selectedLevel = req.query.class; // This comes from your dropdown
+        const users = await User.find({ classLevel: selectedLevel }).select('regNo');
+        const regNumbers = users.map(u => u.regNo);
+        res.json(regNumbers);
+    } catch (err) {
+        res.status(500).json([]);
+    }
+});
+
+
+
+//Reset UserExamSession// GET: Fetch all students who have attempted a specific exam
+app.get('/api/exams/attempts/:examId', async (req, res) => {
+    try {
+        const { examId } = req.params;
+        
+        // Find results where examId (Blueprint) OR examSessionId matches the target
+        const results = await Result.find({ 
+            $or: [{ examId: examId }, { examSessionId: examId }] 
+        })
+        .populate('userId', 'firstName lastName middleName regNo regNumber')
+        .lean();
+        
+        const studentData = results.map(r => {
+            const user = r.userId;
+            return {
+                userId: user?._id,
+                regNo: user?.regNumber || user?.regNo || "N/A",
+                name: user ? `${user.firstName} ${user.middleName || ''} ${user.lastName}`.trim().toUpperCase() : "DELETED USER",
+                status: "Submitted",
+                score: r.aggregateScore ?? r.totalWeightedScore ?? 0,
+                examDate: r.examDate
+            };
+        });
+
+        res.json(studentData);
+    } catch (err) {
+        console.error("Attempts Fetch Error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/exams/reset/:examId', async (req, res) => {
+    try {
+        const { examId } = req.params; 
+        const { type, regNumbers } = req.body;
+
+        let userQuery = {};
+        if (type === 'selected' && regNumbers && regNumbers.length > 0) {
+            // Target specific students by their Reg Numbers
+            const searchTerms = regNumbers.map(r => String(r));
+            userQuery = {
+                $or: [
+                    { regNo: { $in: searchTerms } },
+                    { regNumber: { $in: searchTerms } }
+                ]
+            };
+        } else {
+            // Target EVERYONE allocated to this specific exam blueprint
+            userQuery = { "examAllocations.examId": examId };
+        }
+
+        const targetUsers = await User.find(userQuery).select('_id regNo regNumber');
+        
+        if (!targetUsers || targetUsers.length === 0) {
+            return res.status(404).json({ message: "No students found to reset." });
+        }
+
+        const userIds = targetUsers.map(u => u._id);
+
+        // 1. Wipe Result records
+        // We look for the Blueprint ID (examId) OR the specific Session ID
+        const resDelete = await Result.deleteMany({ 
+            userId: { $in: userIds },
+            $or: [{ examId: examId }, { examSessionId: examId }] 
+        });
+
+        // 2. Wipe Exam Sessions (The "live" progress)
+        const examDelete = await Exam.deleteMany({ 
+            userId: { $in: userIds },
+            $or: [{ examId: examId }, { _id: examId }] // _id in Exam collection is the Session ID
+        });
+
+        // 3. Reset the 'hasTaken' flag in User Allocations
+        // This is what allows them to click "Start Exam" again
+        await User.updateMany(
+            { _id: { $in: userIds } },
+            { $set: { "examAllocations.$[elem].hasTaken": false } },
+            { arrayFilters: [{ "elem.examId": examId }] }
+        );
+
+        res.json({ 
+            success: true, 
+            message: `Successfully reset ${userIds.length} student(s).`,
+            details: {
+                resultsDeleted: resDelete.deletedCount,
+                sessionsDeleted: examDelete.deletedCount
+            }
+        });
+
+    } catch (err) {
+        console.error("Reset Route Error:", err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// DISTRIBUTE 
+// POST: Randomly assign students to batches
+
+app.post('/api/exams/distribute-batches/:id', async (req, res) => {
+    try {
+        const examId = req.params.id;
+        const { clearAll } = req.body;
+        
+        const exam = await ExamConfig.findById(examId);
+        if (!exam) return res.status(404).json({ error: "Exam not found" });
+
+        const studentRegs = exam.assignedStudents;
+        const batches = exam.batchSettings;
+
+        if (clearAll) {
+            await User.updateMany(
+                { regNo: { $in: studentRegs } },
+                { $pull: { examAllocations: { examId: exam._id } } }
+            );
+        }
+
+        // Identify unassigned students
+        const allUsers = await User.find({ regNo: { $in: studentRegs } });
+        const unassignedUsers = allUsers.filter(u => 
+            !u.examAllocations.some(alloc => alloc.examId.toString() === examId)
+        );
+
+        if (unassignedUsers.length === 0) {
+            return res.json({ message: "No unassigned students found." });
+        }
+
+        // SHUFFLE: Use the exam's shuffleSeed if it exists for consistent randomization,
+        // otherwise use Math.random() for fresh distribution.
+        const shuffled = unassignedUsers.sort(() => Math.random() - 0.5);
+
+        // BALANCING LOGIC: 
+        // Find current occupancy of each batch to fill the emptiest ones first
+        const occupancyMap = {};
+        batches.forEach(b => occupancyMap[b.batchNumber] = 0);
+        
+        allUsers.forEach(u => {
+            const alloc = u.examAllocations.find(a => a.examId.toString() === examId);
+            if (alloc) occupancyMap[alloc.batchNumber]++;
+        });
+
+        const updatePromises = shuffled.map((user, index) => {
+            // Find batch with the smallest count
+            const sortedBatches = [...batches].sort((a, b) => 
+                occupancyMap[a.batchNumber] - occupancyMap[b.batchNumber]
+            );
+            
+            const targetBatch = sortedBatches[0];
+            occupancyMap[targetBatch.batchNumber]++; // Update map for next iteration
+
+            return User.updateOne(
+                { _id: user._id },
+                { 
+                    $push: { 
+                        examAllocations: {
+                            examId: exam._id,
+                            title: exam.title,
+                            batchNumber: targetBatch.batchNumber,
+                            startTime: targetBatch.startTime,
+                            endTime: targetBatch.endTime,
+                            // Pass the Seed DNA to the student's allocation
+                            shuffleSeed: exam.shuffleSeed 
+                        } 
+                    } 
+                }
+            );
+        });
+
+        await Promise.all(updatePromises);
+        res.json({ message: `Assigned ${shuffled.length} new students.` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/exams/move-student', async (req, res) => {
+    const { regNo, examId, newBatchNumber } = req.body;
+    
+    try {
+        // Find the exam to get the correct batch timing
+        const exam = await ExamConfig.findById(examId);
+        const batchInfo = exam.batchSettings.find(b => b.batchNumber == newBatchNumber);
+
+        if (!batchInfo) return res.status(400).json({ error: "Invalid batch" });
+
+        // Update the specific allocation in the User's array
+        await User.updateOne(
+            { regNo, "examAllocations.examId": examId },
+            { 
+                $set: { 
+                    "examAllocations.$.batchNumber": parseInt(newBatchNumber),
+                    "examAllocations.$.startTime": batchInfo.startTime,
+                    "examAllocations.$.endTime": batchInfo.endTime
+                } 
+            }
+        );
+        
+        res.json({ message: "Student moved successfully" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// GET: List of students assigned to a specific exam
+app.get('/api/exams/assigned-students/:examId', async (req, res) => {
+    try {
+        const exam = await ExamConfig.findById(req.params.examId);
+        if (!exam) return res.status(404).json({ error: "Exam not found" });
+
+        // Find users whose regNo is in the exam's assigned list
+        const users = await User.find({ regNo: { $in: exam.assignedStudents } })
+                                .select('fullName regNo examAllocations');
+        res.json(users);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// EMAIL EXAM SCHEDULING
+
+// Helper for the delay
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+app.post('/api/exams/notify-students/:id', async (req, res) => {
+    try {
+        const examId = req.params.id;
+        const { testEmail } = req.body; // New: Option to override recipient
+        
+        const exam = await ExamConfig.findById(examId);
+        const users = await User.find({ "examAllocations.examId": examId });
+
+        if (users.length === 0) {
+            return res.status(400).json({ error: "No students allocated." });
+        }
+
+        // Send immediate response
+        res.json({ message: `Dispatching emails to ${users.length} students...` });
+        // Background Loop inside app.post('/api/exams/notify-students/:id')
+for (const user of users) {
+    const alloc = user.examAllocations.find(a => a.examId.toString() === examId);
+    const recipient = testEmail || user.email;
+
+    if (alloc && recipient) {
+        try {
+            // Formatting Name: LAST NAME, First Name Middle Name
+            const lastName = (user.lastName || '').toUpperCase();
+            const firstName = user.firstName || '';
+            const middleName = user.middleName ? ` ${user.middleName}` : '';
+            const fullName = `${lastName}, ${firstName}${middleName}`;
+
+            await transporter.sendMail({
+                from: '"SAVVY SCHOLARS TUTORS" <savvyscholarstutors@gmail.com>',
+                to: recipient,
+                subject: `Exam Schedule: ${exam.title}`,
+                html: `
+                    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 550px; border: 1px solid #e2e8f0; padding: 30px; border-radius: 12px; color: #1e293b; line-height: 1.6;">
+                        <h2 style="color: #2563eb; margin-top: 0; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">Exam Login Credentials</h2>
+                        <p>Hello <b>${fullName}</b>,</p>
+                        <p>Your personalized schedule for <b>${exam.title}</b> is now available. Please keep this information safe.</p>
+                        
+                        <div style="background: #f8fafc; padding: 20px; border-radius: 8px; border: 1px solid #cbd5e1; margin: 20px 0;">
+                            <table style="width: 100%; border-collapse: collapse; font-size: 15px;">
+                                <tr><td style="padding: 5px 0;"><b>Registration No:</b></td><td>${user.regNo}</td></tr>
+                                <tr><td style="padding: 5px 0;"><b>Exam
+                                Password:</b></td><td style="color: #dc2626;
+                                font-weight: bold; font-size:
+                                1.1rem;">${user.plainPassword}</td></tr>
+                                <tr><td colspan="2"><hr style="border:0; border-top:1px solid #e2e8f0; margin:10px 0;"></td></tr>
+                                <tr><td style="padding: 5px 0;"><b>Batch:</b></td><td>Batch ${alloc.batchNumber}</td></tr>
+                                <tr><td style="padding: 5px 0;"><b>Date:</b></td><td>${new Date(alloc.startTime).toLocaleDateString('en-NG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</td></tr>
+                                <tr><td style="padding: 5px 0;"><b>Start Time:</b></td><td>${new Date(alloc.startTime).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', hour12: true })} (GMT+1)</td></tr>
+                                <tr><td style="padding: 5px 0;"><b>End Time:</b></td><td>${new Date(alloc.endTime).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', hour12: true })} (GMT+1)</td></tr>
+                                <tr><td style="padding: 5px 0;"><b>Duration:</b></td><td>120 Minutes (2 Hours)</td></tr>
+                            </table>
+                        </div>
+
+                        <div style="background: #fffbeb; border-left: 4px solid #f59e0b; padding: 15px; margin-top: 20px;">
+                            <p style="margin: 0; font-size: 0.9rem; color: #92400e;">
+                                <b>Important Instruction:</b> Please ensure you sit for your exam within the time window allocated above. Your login credentials will <u>only</u> be active during this period.
+                            </p>
+                        </div>
+
+                        <p style="font-size: 0.8rem; color: #64748b; margin-top: 25px; text-align: center; border-top: 1px solid #eee; padding-top: 15px;">
+                            Powered by SAVVY SCHOLARS TUTORS CBT System
+                        </p>
+                    </div>
+                `
+            });
+            console.log(`Success: Notified ${user.regNo} @ ${recipient}`);
+            await delay(3500); 
+        } catch (e) {
+            console.error(`Mail Error for ${user.regNo}:`, e.message);
+        }
+    }
+}
+
+    } catch (err) {
+        console.error("Critical Notify Error:", err);
+    }
+});
+
+
+app.get('/admin/user-history/:userId', async (req, res) => {
+    try {
+        const history = await Result.find({ userId: req.params.userId })
+            .populate('examId', 'name title') 
+            .select('examId examDate aggregateScore preciseRankingScore subjectResults')
+            .sort({ examDate: -1 })
+            .lean();
+
+        const formattedHistory = history.map(h => ({
+            resultId: h._id,
+            examBlueprintId: h.examId?._id || h.examId, // Pass the ID for filtering
+            examName: h.examId?.name || h.examId?.title || "Unknown Exam",
+            date: h.examDate,
+            score: h.aggregateScore || 0,
+            precise: h.preciseRankingScore || 0,
+            subjectCount: h.subjectResults ? h.subjectResults.length : 0
+        }));
+
+        res.json(formattedHistory);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+
+const FRONTEND_BASE = process.env.FRONTEND_URL || "http://127.0.0.1:8158";
+router.post('/publish', async (req, res) => {
+    const { resultIds, isTest = false } = req.body;
+    
+    try {
+        const results = await Result.find({ _id: { $in: resultIds } }).populate('studentId');
+        
+        for (let result of results) {
+            const student = result.studentId;
+            // Use your defined BASE_URL for the portal link
+            const resultLink = `${FRONTEND_BASE}/CBT-SYSTEM/frontend/result-portal.html?id=${result._id}`;
+            
+            // Build the Subject Score HTML rows
+            const subjectRows = result.subjectScores.map(s => `
+                <tr style="border-bottom: 1px solid #eee;">
+                    <td style="padding: 10px; color: #475569;">${s.subject}</td>
+                    <td style="padding: 10px; font-weight: bold; text-align: right;">${s.score}%</td>
+                </tr>
+            `).join('');
+
+            await transporter.sendMail({
+                from: '"The Math Workshop" <exams@themathworkshop.com>',
+                to: student.email,
+                subject: isTest ? `[TEST] Result Notification: ${result.examTitle}` : `Result Published: ${result.examTitle}`,
+                html: `
+                    <div style="font-family: 'Segoe UI', sans-serif; max-width: 600px; margin: auto; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px;">
+                        <h2 style="color: #1e293b; margin-top: 0;">Hello ${student.fullName},</h2>
+                        <p style="color: #475569;">Your performance report for <b>${result.examTitle}</b> is now ready.</p>
+                        
+                        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                            <thead>
+                                <tr style="background: #f8fafc; text-align: left;">
+                                    <th style="padding: 10px; color: #6366f1;">Subject</th>
+                                    <th style="padding: 10px; color: #6366f1; text-align: right;">Score</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${subjectRows}
+                                <tr style="background: #6366f1; color: white;">
+                                    <td style="padding: 12px; font-weight: bold; border-bottom-left-radius: 8px;">AGGREGATE</td>
+                                    <td style="padding: 12px; font-weight: bold; text-align: right; border-bottom-right-radius: 8px;">${result.totalScore}%</td>
+                                </tr>
+                            </tbody>
+                        </table>
+
+                        <p style="color: #475569;">Click the button below to view your full script analysis and download your official result slip:</p>
+                        
+                        <div style="text-align: center; margin: 30px 0;">
+                            <a href="${resultLink}" style="background: #6366f1; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                                View Full Result & Script
+                            </a>
+                        </div>
+                        
+                        <p style="font-size: 0.8rem; color: #94a3b8; text-align: center;">
+                            Reg No: ${student.regNo} | Date: ${new Date().toLocaleDateString()}
+                        </p>
+                    </div>
+                `
+            });
+
+            if (!isTest) {
+                result.isPublished = true;
+                await result.save();
+            }
+        }
+        res.json({ success: true, message: isTest ? "Test email sent!" : "Results published and emails sent!" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/questions/topics/:subject', async (req, res) => {
+    try {
+        const { subject } = req.params;
+        const { examType } = req.query; // Capture ?examType=WAEC
+
+        let filter = { subject: subject };
+        
+        // If the admin selected a specific source body (JAMB/WAEC), filter by it!
+        if (examType && examType !== 'undefined') {
+            filter.examType = examType;
+        }
+
+        const topics = await Question.distinct("topic", filter);
+        res.json(topics);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch topics: " + err.message });
+    }
+});
+
+app.get('/api/questions/subjects/all', async (req, res) => {
+    try {
+        // Gets every unique subject across your entire Question database
+        const subjects = await Question.distinct("subject");
+        res.json(subjects);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch subjects: " + err.message });
+    }
+});
+
+app.get('/api/questions/search', async (req, res) => {
+    try {
+        const { subject, topic, year, examType } = req.query;
+        let query = { subject, topic };
+        
+        if (year && year !== 'All') query.year = year;
+        if (examType) query.examType = examType;
+
+        // Fetch questions, only returning the text and ID to keep it fast
+        const questions = await Question.find(query).select('questionText _id hasImage').limit(100);
+        res.json(questions);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+
+// ---------    EXAM PAGE    ---------------
+// --- AUTHENTICATION: LOGIN API ---
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { regNumber, password } = req.body;
+        
+        // 1. Find user and normalize Reg Number
+        // Using plainPassword as per your existing schema structure
+        const user = await User.findOne({ 
+            regNo: regNumber.trim().toUpperCase(), 
+            plainPassword: password.trim() 
+        });
+
+        if (!user) {
+            return res.status(401).json({ 
+                success: false, 
+                message: "Invalid Registration Number or PIN" 
+            });
+        }
+
+        const now = new Date().getTime();
+        const gracePeriod = 10 * 60 * 1000; // 30-minute window before start
+
+        // 2. Process allocations to determine exam status
+        const processedAllocations = await Promise.all(user.examAllocations.map(async (alloc) => {
+            const a = alloc.toObject ? alloc.toObject() : alloc;
+            
+            const start = new Date(a.startTime).getTime();
+            const end = new Date(a.endTime).getTime();
+
+            let status = "scheduled";
+            let canClick = false;
+
+            // Determine visibility and clickability
+            if (a.hasTaken) {
+                status = "submitted";
+            } else if (now >= (start - gracePeriod) && now <= end) {
+                status = "active";
+                canClick = true;
+            } else if (now > end) {
+                status = "expired";
+            }
+
+            // 3. Check for an existing active session to allow Resumption
+            const existingSession = await Exam.findOne({ 
+                userId: user._id, 
+                examId: a.examId, 
+                status: 'active' 
+            });
+
+            return {
+                ...a,
+                currentStatus: status,
+                canClick: canClick,
+                resumeSessionId: existingSession ? existingSession._id : null
+            };
+        }));
+
+        // 4. Return clean User and Allocation data to Frontend
+        res.json({
+            success: true,
+            user: {
+                _id: user._id,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                regNo: user.regNo,
+                subjectCombination: user.subjectCombination,
+                subject: user.subject,
+                batchNumber: user.batchNumber || 1 // Essential for our seeded shuffle
+            },
+            allocations: processedAllocations
+        });
+
+    } catch (err) {
+        console.error("Login Error:", err);
+        res.status(500).json({ 
+            success: false, 
+            message: "Server Error during authentication." 
+        });
+    }
+});
+
+// --- GET EXAM CONFIG FOR INSTRUCTIONS ---
+app.get('/api/exams/config/:id', async (req, res) => {
+    try {
+        const config = await ExamConfig.findById(req.params.id);
+        
+        if (!config) {
+            return res.status(404).json({ error: "Configuration not found" });
+        }
+
+        // Return the full config so the frontend can access title, instructions, etc.
+        res.json(config);
+    } catch (err) {
+        console.error("Config Fetch Error:", err);
+        res.status(500).json({ error: "Failed to load exam instructions" });
+    }
+});
+
+
+// =========================================================================
+// --- 1. START OR RESUME EXAM ---
+// =========================================================================
+app.post('/api/exams/start-exam', async (req, res) => {
+    try {
+        const { userId, examId } = req.body;
+        const user = await User.findById(userId);
+        const config = await ExamConfig.findById(examId);
+
+        if (!user || !config) return res.status(404).json({ error: "Context not found" });
+
+        // Max Attempt Check
+        const attemptCount = await Exam.countDocuments({ 
+            userId, examId, status: { $in: ['submitted', 'timed-out'] } 
+        });
+        if (attemptCount >= (config.maxAttempts || 1)) {
+            return res.status(403).json({ error: "Maximum attempts reached." });
+        }
+
+        let examSession = await Exam.findOne({ userId, examId, status: 'active' });
+
+        if (!examSession) {
+            let subjectsToLoad = [];
+            
+            /**
+             * SWITCH: examType
+             * JAMB -> Uses multi-subject combination from User profile.
+             * WAEC/Internal -> Uses the specific subject defined in Config.
+             */
+            if (config.examType === 'JAMB') {
+                subjectsToLoad = user.subjectCombination || []; 
+            } else {
+                const targetSubject = (config.subject && config.subject !== 'General') 
+                    ? config.subject 
+                    : null;
+                subjectsToLoad = targetSubject ? [targetSubject] : (user.subjectCombination || []);
+            }
+
+            // Safety filter for nulls/empty strings
+            subjectsToLoad = subjectsToLoad.filter(s => s != null && s !== "");
+
+            if (subjectsToLoad.length === 0) {
+                return res.status(400).json({ error: "No valid subjects could be determined for this exam." });
+            }
+
+            // TIMING LOGIC: Uses flat durationValue (in minutes) converted to seconds
+            const baseMinutes = config.durationValue || 120;
+            const examDurationSeconds = baseMinutes * 60;
+
+            examSession = new Exam({
+                userId,
+                examId,
+                subjectCombination: subjectsToLoad,
+                status: 'active',
+                startTime: new Date(),
+                totalSecondsRemaining: examDurationSeconds,
+                responses: []
+            });
+            await examSession.save();
+
+            // CRITICAL FIX: Mark hasTaken instantly on start to lock out multi-tab exploits
+            await User.updateOne(
+                { _id: userId, "examAllocations.examId": examId },
+                { $set: { "examAllocations.$.hasTaken": true } }
+            );
+        }
+
+        res.json({ examId: examSession._id });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
+// =========================================================================
+// --- 2. FETCH QUESTIONS (WITH SMART STRUCTURED JAMB ENGLISH) ---
+// =========================================================================
+app.get('/api/exams/fetch-questions/:sessionId', async (req, res) => {
+    try {
+        console.log(`[FETCH START]: Session ${req.params.sessionId}`);
+        
+        // 1. Fetch Session and Config
+        const session = await Exam.findById(req.params.sessionId).populate('userId');
+        if (!session) return res.status(404).json({ error: "Exam session not found" });
+
+        const config = await ExamConfig.findById(session.examId);
+        if (!config) return res.status(404).json({ error: "Exam configuration missing" });
+
+        // Safety: Handle batch number and English detection
+        const batchNum = (session.userId && session.userId.batchNumber) ? session.userId.batchNumber : 1;
+        const isEnglish = (sub) => sub && (sub.toLowerCase().includes('english') || sub.toLowerCase().includes('use of english'));
+
+        // Seeded Shuffle Helper
+        const getBatchPool = (allQs, bNum, masterSeed = 123) => {
+            if (!allQs || !allQs.length) return [];
+            const seed = (bNum * masterSeed);
+            let m = allQs.length, t, i;
+            let pool = [...allQs];
+            while (m) {
+                i = Math.floor(Math.abs(Math.sin(seed + m) * m--));
+                t = pool[m]; pool[m] = pool[i]; pool[i] = t;
+            }
+            return pool;
+        };
+
+        // Option & Data Sanitizer
+        const sanitize = (q) => {
+            if (!q) return null;
+            const plain = q.toObject ? q.toObject() : q;
+            let options = plain.options || [];
+            
+            const shouldShuffleOpts = config.shuffleType === 'both' || config.shuffleType === 'smart';
+            if (shouldShuffleOpts && options.length > 0) {
+                options = [...options].sort(() => 0.5 - Math.random());
+            }
+            return {
+                ...plain,
+                questionText: plain.questionText || plain.question || "Question text missing",
+                options
+            };
+        };
+
+        // --- 3. RESUMPTION LAYER ---
+        if (session.questionsServed && session.questionsServed.length > 0) {
+            console.log(`[RESUME]: Batch ${batchNum} returning to existing session.`);
+            const questions = await Question.find({ _id: { $in: session.questionsServed } });
+            const qMap = new Map(questions.map(q => [q._id.toString(), q]));
+            const orderedQs = session.questionsServed.map(id => qMap.get(id.toString())).filter(Boolean);
+
+            const combo = session.subjectCombination || [];
+            const results = combo.map(sub => ({
+                subject: sub,
+                questions: orderedQs.filter(q => q.subject === sub).map(q => sanitize(q)).filter(Boolean)
+            }));
+
+            return res.json({ 
+                subjects: results, 
+                totalSecondsRemaining: session.totalSecondsRemaining, 
+                timerMode: config.timingMode || 'general'
+            });
+        }
+
+        // --- 4. FRESH GENERATION LAYER ---
+        const results = [];
+        let allServedIds = [];
+        
+        // CRITICAL SCHEMA FIX: Using config.subject.
+        // We wrap it in [].flat() to handle cases where it might be a string OR an array.
+        let subjectList = [];
+        if (config.examType === 'JAMB') {
+            subjectList = session.subjectCombination || [];
+        } else {
+            // Converts config.subject to an array even if it's stored as a single string
+            subjectList = Array.isArray(config.subject) ? config.subject : (config.subject ? [config.subject] : []);
+        }
+
+        if (subjectList.length === 0) {
+            console.error("[FETCH ERROR]: Subject list is empty. Config ID:", config._id);
+            return res.status(400).json({ error: "No subjects found in Exam Configuration." });
+        }
+
+        for (const sub of subjectList) {
+            let finalQuestions = [];
+            const isSubEng = isEnglish(sub);
+
+            if (config.selectionMode === 'static') {
+                let dist = (config.topicDistribution || []).filter(d => d.subject === sub);
+                
+                if (isSubEng && dist.length === 0) {
+                    dist = getEnglishFallback(config.examType);
+                }
+
+                if (dist.length > 0) {
+                    finalQuestions = await generateFromStaticDistribution(dist, sub, config, batchNum, getBatchPool);
+                } else {
+                    const allQs = await Question.find({ subject: sub, examType: config.examType });
+                    finalQuestions = getBatchPool(allQs, batchNum, config.shuffleSeed).slice(0, config.totalQuestions || 40);
+                }
+
+                if (!isSubEng && config.shuffleType === 'both') {
+                    finalQuestions.sort(() => 0.5 - Math.random());
+                }
+              } else {
+                // FORCE JAMB STANDARDS: English is 60, all other subjects are 40
+                const targetQty = isSubEng ? 60 : 40; 
+                console.log(`[GEN]: Strict JAMB limit for ${sub}: ${targetQty} questions`);
+                
+                const allQs = await Question.find({ subject: sub, examType: config.examType });
+                
+                // Use getBatchPool to ensure seeded consistency, then slice to target
+                finalQuestions = getBatchPool(allQs, batchNum, config.shuffleSeed || 123).slice(0, targetQty);
+            }
+
+            const sanitized = finalQuestions.map(q => sanitize(q)).filter(Boolean);
+            results.push({ subject: sub, questions: sanitized });
+            allServedIds.push(...sanitized.map(q => q._id));
+        }
+// --- 5. FINALIZATION & SAVE ---
+        // Only set the total time if this is the VERY FIRST time questions are being served
+        if (!session.questionsServed || session.questionsServed.length === 0) {
+            const totalMinutes = config.durationValue || 120;
+            session.totalSecondsRemaining = totalMinutes * 60;
+            session.questionsServed = allServedIds;
+            await session.save();
+        }
+
+        // Send the response
+        res.json({ 
+            subjects: results, 
+            totalSecondsRemaining: session.totalSecondsRemaining, 
+            timerMode: config.timingMode || 'general',
+            selectionMode: config.selectionMode,
+            
+            // Map sub-timing strictly from the config durationValue
+            // This ensures perQuestion and perSet always use your specific duration settings
+            perQuestionSeconds: (config.durationValue || 1) * 60, 
+            perSetQty: config.perSetQty || 10,
+            perSetSeconds: (config.durationValue || 10) * 60 
+        });
+
+    } catch (err) {
+        console.error("[FETCH CRITICAL ERROR]:", err);
+        res.status(500).json({ error: "Server Internal Error: " + err.message });
+    }
+});
+
+// --- HELPER: STATIC DISTRIBUTOR ---
+async function generateFromStaticDistribution(dist, subject, config, batchNum, poolHelper) {
+    let output = [];
+    for (const d of dist) {
+        const query = { subject, topic: d.topic.trim(), examType: config.examType };
+        if (d.subTopic) query.subTopic = d.subTopic.trim();
+        if (d.subsubTopic) query.subsubTopic = d.subsubTopic.trim();
+
+        const allAvailable = await Question.find(query);
+        const qty = parseInt(d.qty) || 0;
+
+        if (d.subTopic?.toLowerCase().includes("passage")) {
+            // Grouping Logic for Passages
+            const groups = {};
+            allAvailable.forEach(q => {
+                const key = q.subsubTopic || q.passageId || 'none';
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(q);
+            });
+            const keys = Object.keys(groups).sort();
+            if (keys.length > 0) {
+                const selectedKey = keys[(batchNum - 1) % keys.length];
+                output.push(...groups[selectedKey].slice(0, qty));
+            }
+        } else {
+            // Seeded batching for normal topics
+            const pool = poolHelper(allAvailable, batchNum, config.shuffleSeed || 123);
+            output.push(...pool.slice(0, qty));
+        }
+    }
+    return output;
+}
+
+// --- HELPER: ENGLISH BLUEPRINTS ---
+function getEnglishFallback(type) {
+    // Standard JAMB sequence as the hardcoded safety net
+    return [
+        { topic: "Section A: Comprehension and Summary", subTopic: "Comprehension Passage", qty: 5 },
+        { topic: "Section A: Comprehension and Summary", subTopic: "Cloze Passage", qty: 10 },
+        { topic: "Section A: Comprehension and Summary", subTopic: "Reading Text", qty: 10 },
+        { topic: "Section B: Lexis and Structure", subTopic: "Sentence Interpretation", qty: 5 },
+        { topic: "Section B: Lexis and Structure", subTopic: "Antonyms", qty: 5 },
+        { topic: "Section B: Lexis and Structure", subTopic: "Synonyms", qty: 5 },
+        { topic: "Section B: Lexis and Structure", subTopic: "Sentence Completion", qty: 10 },
+        { topic: "Section C: Oral Forms", subTopic: "Word Stress", qty: 2 },
+        { topic: "Section C: Oral Forms", subTopic: "Vowels", qty: 2 },
+        { topic: "Section C: Oral Forms", subTopic: "Consonants", qty: 2 },
+        { topic: "Section C: Oral Forms", subTopic: "Rhymes", qty: 2 },
+        { topic: "Section C: Oral Forms", subTopic: "Emphatic Stress", qty: 2 }
+    ];
+}
+
+// =========================================================================
+// --- 3. SUBMIT, HARD-LOCK SCORE & NORMALIZATION ---
+// =========================================================================
+app.post('/api/exams/submit-exam', async (req, res) => {
+    try {
+        const { examId, responses, subjectAnalysis, status, totalSecondsRemaining } = req.body;
+        
+        const session = await Exam.findById(examId);
+        if (!session) return res.status(404).json({ error: "Exam session missing" });
+        
+        const config = await ExamConfig.findById(session.examId);
+        if (!config) return res.status(404).json({ error: "Configuration mismatch" });
+
+        const isJAMB = config.examType === 'JAMB';
+        let finalResultData = null;
+
+        // 1. UPDATE SESSION STATE
+        session.responses = responses || [];
+        session.status = status;
+        session.totalSecondsRemaining = totalSecondsRemaining;
+        
+        if (subjectAnalysis && Array.isArray(subjectAnalysis)) {
+            session.subjectAnalysis = subjectAnalysis;
+        }
+
+        // 2. SCORING & FINALIZATION LOGIC
+        // Always calculate scores for non-JAMB exams (Live WAEC scoring) 
+        // OR when the exam is officially ending (submitted/timed-out)
+        if (status === 'submitted' || status === 'timed-out' || !isJAMB) {
+            
+            // Execute scoring engine
+            const subjectResults = await calculateScore(session.responses, session, config);
+            
+            // Calculate Aggregates
+            const aggregate = subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore2 || 0), 0);
+            const precise = subjectResults.reduce((acc, curr) => acc + (curr.normalizedScore1 || 0), 0);
+            const totalDuration = (config.durationValue || 120) * 60;
+            const timeTaken = Math.max(0, totalDuration - totalSecondsRemaining);
+
+            // 3. UPSERT RESULT RECORD
+            finalResultData = await Result.findOneAndUpdate(
+                { examSessionId: session._id },
+                {
+                    userId: session.userId,
+                    examId: session.examId,
+                    examSessionId: session._id,
+                    subjectResults: subjectResults,
+                    aggregateScore: aggregate,
+                    preciseRankingScore: parseFloat(precise.toFixed(3)),
+                    timeTaken: timeTaken,
+                    examType: config.examType
+                },
+                { upsert: true, new: true }
+            );
+
+            // 4. JAMB NORMALIZATION (POST-SUBMIT)
+            if (isJAMB && (status === 'submitted' || status === 'timed-out')) {
+                try {
+                    // This is where your scoring.js logic kicks in
+                    const scoring = require('./scoring');
+                    await scoring.runNormalization(Result, session.examId);
+                    
+                    // Re-fetch to get the "Curved" values for the frontend
+                    finalResultData = await Result.findOne({ examSessionId: session._id });
+                } catch (scoreErr) {
+                    console.error("[SCORING ERR]: Normalization failed, showing raw instead.", scoreErr);
+                }
+            }
+
+            // 5. LOCK USER ACCESS
+            if (status === 'submitted' || status === 'timed-out') {
+                await User.updateOne(
+                    { _id: session.userId, "examAllocations.examId": session.examId },
+                    { $set: { "examAllocations.$.hasTaken": true } }
+                );
+            }
+        }
+
+        await session.save();
+        
+        // Return exactly what showResults expects
+        return res.json({ 
+            success: true, 
+            status: session.status,
+            data: finalResultData 
+        });
+
+    } catch (err) {
+        console.error("[SERVER SUBMIT CRASH]:", err);
+        res.status(500).json({ error: "Submission Error: " + err.message });
+    }
+});
+
+/**
+ * THE SCORING ENGINE
+ * Handles Weighted scores, JAMB fixed totals, and Missing question weight fallbacks.
+ */
+async function calculateScore(responses, session, config) {
+    const questions = await Question.find({ _id: { $in: session.questionsServed } });
+    const isJAMB = config.examType === 'JAMB';
+    const isWAEC = config.examType === 'WAEC';
+    const cleanResponses = Array.isArray(responses) ? responses : [];
+
+    // Map each subject in the candidate's combination
+    return session.subjectCombination.map(subName => {
+        const subQuestions = questions.filter(q => q.subject === subName);
+        let correct = 0, sumCorrectWeight = 0, sumServedWeight = 0;
+
+        subQuestions.forEach(q => {
+            const weight = q.weight || 1;
+            sumServedWeight += weight;
+            
+            const userRes = cleanResponses.find(r => 
+                String(r.questionId) === String(q._id)
+            );
+
+            if (userRes && userRes.selectedOptionKey) {
+                const userOpt = String(userRes.selectedOptionKey).trim().toLowerCase();
+                const correctOpt = String(q.answer).trim().toLowerCase();
+
+                if (userOpt === correctOpt) {
+                    correct++;
+                    sumCorrectWeight += weight;
+                }
+            }
+        });
+
+        // Determine expected total for the subject
+        let fixedTotal = 0;
+        if (isJAMB) {
+            fixedTotal = subName.toLowerCase().includes('english') ? 60 : 40;
+        } else {
+            const distTotal = config.topicDistribution
+                ?.filter(d => d.subject === subName)
+                .reduce((acc, curr) => acc + (parseInt(curr.qty) || 0), 0);
+            fixedTotal = distTotal || config.totalQuestions || subQuestions.length || 40;
+        }
+
+        // --- THE "MISSING QUESTION" WEIGHT LOGIC ---
+        // If the DB didn't have enough questions to match the exam total, 
+        // we fill the remaining "potential weight" with 1 per missing question.
+        const missingQty = Math.max(0, fixedTotal - subQuestions.length);
+        const totalPossibleWeight = sumServedWeight + (missingQty * 1);
+
+        // Raw calculations
+        const rawPercentage = fixedTotal > 0 ? (correct / fixedTotal) * 100 : 0;
+        const weightedPercentage = totalPossibleWeight > 0 ? (sumCorrectWeight / totalPossibleWeight) * 100 : 0;
+
+        const res = {
+            subjectName: subName,
+            correctCount: correct,
+            totalQuestions: fixedTotal,
+            rawScore1: rawPercentage,
+            rawScore2: Math.round(rawPercentage),
+            weightedScore1: weightedPercentage,
+            weightedScore2: Math.round(weightedPercentage),
+            normalizedScore1: rawPercentage, // Default
+            normalizedScore2: Math.round(rawPercentage),
+            grade: ""
+        };
+
+        // --- SPECIFIC EXAM LOGIC ---
+        if (isJAMB) {
+            // JAMB uses Weighted score as Normalized Score 1
+            res.normalizedScore1 = weightedPercentage;
+            res.normalizedScore2 = Math.round(weightedPercentage);
+        }
+
+        if (isWAEC) {
+            // WAEC also uses weights but requires a letter grade
+            res.normalizedScore1 = weightedPercentage;
+            res.normalizedScore2 = Math.round(weightedPercentage);
+            
+            // Grades are calculated on the weighted total
+            if (typeof getWAECGrade === 'function') {
+                res.grade = getWAECGrade(res.weightedScore2);
+            } else {
+                // Inline Grade Fallback if helper is missing
+                const s = res.weightedScore2;
+                if (s >= 75) res.grade = "A1";
+                else if (s >= 70) res.grade = "B2";
+                else if (s >= 65) res.grade = "B3";
+                else if (s >= 60) res.grade = "C4";
+                else if (s >= 55) res.grade = "C5";
+                else if (s >= 50) res.grade = "C6";
+                else if (s >= 45) res.grade = "D7";
+                else if (s >= 40) res.grade = "E8";
+                else res.grade = "F9";
+            }
+        }
+
+        return res;
+    });
+}
+
+module.exports = router;
+// Server Initialization
+// const PORT = process.env.PORT || 5000;
+// app.listen(PORT, () => {
+ //  console.log(`🚀 Server running on port ${PORT}`);
+// });
+

@@ -1,7 +1,37 @@
 const mongoose = require('mongoose');
 
 const UserSchema = new mongoose.Schema({
-  // Identification
+  // ==========================================
+  // 1. TENANT & ROLE MANAGEMENT
+  // ==========================================
+  organizationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Organization',
+    required: [true, "Organization reference is required"],
+    index: true // Key index for fast multi-tenant queries
+  },
+  role: {
+    type: String,
+    enum: [
+      'SUPER_ADMIN', 
+      'CUSTOMER_SERVICE',
+      'ORG_ADMIN', 
+      'ORG_FINANCE', 
+      'EXAM_OFFICER', 
+      'QUESTION_AUTHOR', 
+      'INSTRUCTOR', 
+      'PROCTOR', 
+      'CANDIDATE', 
+      'GUEST_USER'
+    ],
+    default: 'CANDIDATE',
+    required: true,
+    index: true
+  },
+
+  // ==========================================
+  // 2. IDENTIFICATION
+  // ==========================================
   firstName: { 
     type: String, 
     required: [true, "First name is required"], 
@@ -23,65 +53,79 @@ const UserSchema = new mongoose.Schema({
   },
   regNo: { 
     type: String, 
-    unique: true, 
     uppercase: true,
+    trim: true,
     required: [true, "Registration number is required"]
   },
 
-  // Contact & Profile
+  // ==========================================
+  // 3. CONTACT & AUTHENTICATION
+  // ==========================================
   email: {
     type: String,
-    unique: true,
     lowercase: true,
-    trim: true
+    trim: true,
+    sparse: true // Allows nulls while keeping unique constraints functional
   },
   phone: {
     type: String,
     trim: true
   },
+  password: { 
+    type: String, // Bcrypt Hash
+    required: [true, "Password hash is required"] 
+  },
+
+  // ==========================================
+  // 4. ACADEMIC & CANDIDATE PROFILE
+  // ==========================================
   examType: { 
     type: String, 
-    enum: ['JAMB', 'WAEC'], 
-    required: true 
+    enum: ['JAMB', 'WAEC', 'NECO', 'CAMBRIDGE', 'CUSTOM'], 
+    default: 'JAMB'
   },
-  courseOfStudy: { type: String, default: 'N/A' },
-  
   department: { 
     type: String, 
-    default: 'N/A' // Science, Art, Commercial, or N/A
+    enum: ['Science', 'Art', 'Commercial', 'General', 'N/A'],
+    default: 'N/A' 
   },
-
-  // Academic Profile
-  classLevel: {
+  courseOfStudy: { type: String, default: 'N/A' },
+  classLevel: { type: String, trim: true },
+  subjectCombination: [{ type: String, trim: true }],
+  // Profile Media
+  passportUrl: {
     type: String,
-    enum: ['Set1', 'Set2', 'Set3'],
-    required: true
+    default: null, // Stores Cloudinary 
+    trim: true
   },
-  subjectCombination: [String],
 
+  // ==========================================
+  // 5. HOST-ONLY SERVICES (Tutoring & Offline)
+  // ==========================================
+  // Active only when organizationId points to the Host Organization
+  hostServices: {
+    isEnrolledOnlineTutoring: { type: Boolean, default: false },
+    isEnrolledOfflineLessons: { type: Boolean, default: false },
+    batchGroup: { type: String, default: null } // e.g., "Savvy-Morning-Cohort"
+  },
 
-  // Security & Session Management
-  password: { 
-    type: String, // This will store the BCRYPT HASH
-    required: true 
-  },
-  plainPassword: { 
-    type: String, // This stores the readable PIN (e.g., "A1B2C3")
-    required: true 
-  },
-  role: {
+  // ==========================================
+  // 6. ACCOUNT STATE & SESSION
+  // ==========================================
+  status: {
     type: String,
-    default: 'student'
+    enum: [
+      'PENDING_VERIFICATION', 
+      'ACTIVE', 
+      'PENDING_PAYMENT', 
+      'PENDING_APPROVAL', 
+      'SUSPENDED', 
+      'GRADUATED', 
+      'DEACTIVATED'
+    ],
+    default: 'PENDING_VERIFICATION',
+    index: true
   },
-  examAllocations: [{
-    examId: {type: mongoose.Schema.Types.ObjectId, ref: 'exam'},
-    title: String,
-    batchNumber: Number,
-    shuffleSeed: String,
-    startTime: Date,
-    endTime: Date,
-    hasTaken: { type: Boolean, default: false }
-  }],
   isLoggedIn: { 
     type: Boolean, 
     default: false 
@@ -90,14 +134,17 @@ const UserSchema = new mongoose.Schema({
     type: Date,
     default: null
   }
-  
-  // NOTE: createdAt and updatedAt are handled by the { timestamps: true } below
-}, { timestamps: true }); 
+}, { timestamps: true });
 
-// Validator for JAMB Standard
-function arrayLimit(val) {
-  if (!val || val.length === 0) return true; 
-  return val.length === 4;
-}
+// ==========================================
+// INDEXES & CONSTRAINTS
+// ==========================================
+
+// Ensure regNo is unique WITHIN the same organization (allows two different orgs to have a regNo "ST-001")
+UserSchema.index({ organizationId: 1, regNo: 1 }, { unique: true });
+
+// Fast lookup for authentication
+UserSchema.index({ email: 1 });
+UserSchema.index({ phone: 1 });
 
 module.exports = mongoose.model('User', UserSchema);
