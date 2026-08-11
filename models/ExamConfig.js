@@ -122,7 +122,6 @@ examConfigSchema.pre('save', function(next) {
   } else {
     this.releaseMode = this.releaseMode || 'instant';
   }
-  next();
 });
 
 examConfigSchema.index({ organizationId: 1, status: 1 });
