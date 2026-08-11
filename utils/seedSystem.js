@@ -4,13 +4,15 @@ const User = require('../models/User');
 
 async function seedSystem() {
   try {
-    // 1. Ensure Host Organization Exists
+    // 1. Ensure Host Organization Exists and is Active
     let hostOrg = await Organization.findOne({ isHost: true });
     if (!hostOrg) {
       hostOrg = await Organization.create({
         name: "Savvy Scholars Tutors",
         code: "SST",
         isHost: true,
+        status: "ACTIVE", // <-- Set active status
+        isActive: true,
         contactInfo: { 
           email: "savvyscholarstutors@gmail.com", 
           phone: "+2349063771245" 
@@ -25,6 +27,12 @@ async function seedSystem() {
         }
       });
       console.log("✅ Host Organization initialized:", hostOrg.name);
+    } else if (hostOrg.status !== "ACTIVE" || !hostOrg.isActive) {
+      // Auto-heal existing host org if status is missing or inactive
+      hostOrg.status = "ACTIVE";
+      hostOrg.isActive = true;
+      await hostOrg.save();
+      console.log("✅ Host Organization status updated to ACTIVE");
     }
 
     // 2. Ensure System Admin User Exists
