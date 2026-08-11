@@ -1,40 +1,61 @@
 const Exam = require('../models/Exam');
 const ExamSession = require('../models/ExamSession');
-const ExamConfig = require('../models/ExamConfig');
 const Question = require('../models/Question');
 
 /**
- * Helper to retrieve questions array across schema variations
+ * Helper to populate questionsServed and initial responses if an exam attempt is missing them.
  */
-const getQuestionsList = (attemptDoc) => {
-  if (!attemptDoc) return [];
-  return attemptDoc.questions || attemptDoc.questionSnapshots || attemptDoc.answers || [];
-};
+const repairExamQuestions = async (examDoc, organizationId) => {
+  if (examDoc.questionsServed && examDoc.questionsServed.length > 0) {
+    return examDoc;
+  }
 
-/**
- * Helper to generate question snapshots from blueprint config
- */
-const generateSnapshots = async (organizationId, config) => {
-  const questions = await Question.find({
+  // Populate config from session or config reference
+  let config = examDoc.examConfigId;
+  if (!config || !config.subject) {
+    const session = await ExamSession.findOne({ _id: examDoc.sessionId, organizationId }).populate('examConfigId');
+    if (session && session.examConfigId) {
+      config = session.examConfigId;
+    }
+  }
+
+  if (!config) return examDoc;
+
+  // Query database for matching approved questions
+  const queryFilter = {
     organizationId,
-    subject: config.subject,
-    examType: config.examType,
-    paperType: config.paperType,
     status: 'APPROVED'
-  }).limit(config.totalQuestions);
+  };
 
-  return questions.map((q, index) => ({
-    questionId: q._id,
-    sequenceNumber: index + 1,
-    questionText: q.questionText,
-    options: q.options.map(opt => ({
-      optionKey: opt.optionKey,
-      optionText: opt.optionText
-    })),
-    selectedOption: null,
-    isFlagged: false,
-    secondsSpent: 0
-  }));
+  if (config.subject) queryFilter.subject = config.subject;
+  if (config.examType) queryFilter.examType = config.examType;
+  if (config.paperType) queryFilter.paperType = config.paperType;
+
+  let questions = await Question.find(queryFilter).limit(config.totalQuestions || 50);
+
+  // Fallback query if subject/examType matching is too strict
+  if (questions.length === 0) {
+    questions = await Question.find({ organizationId, status: 'APPROVED' }).limit(config.totalQuestions || 50);
+  }
+
+  if (questions.length > 0) {
+    const questionIds = questions.map(q => q._id);
+    examDoc.questionsServed = questionIds;
+    examDoc.responses = questions.map(q => ({
+      questionId: q._id,
+      selectedOptionKey: null,
+      isMarkedForReview: false,
+      subject: q.subject || config.subject || '',
+      secondsSpentOnQuestion: 0,
+      timestamp: new Date()
+    }));
+
+    examDoc.markModified('questionsServed');
+    examDoc.markModified('responses');
+    await examDoc.save();
+  }
+
+  return examDoc;
 };
 
 /**
@@ -61,11 +82,11 @@ exports.startExam = async (req, res) => {
 
     const now = new Date();
     if (now < new Date(session.startDateTime) || now > new Date(session.endDateTime)) {
-      return res.status(403).json({ success: false, error: 'Exam session is outside the scheduled time window.' });
+      return res.status(403).json({ success: false, error: 'Exam session is outside scheduled time window.' });
     }
 
     if (session.accessPin && session.accessPin !== accessPin) {
-      return res.status(401).json({ success: false, error: 'Invalid access PIN for this exam session.' });
+      return res.status(401).json({ success: false, error: 'Invalid access PIN.' });
     }
 
     const config = session.examConfigId;
@@ -73,72 +94,93 @@ exports.startExam = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Linked exam configuration blueprint is missing.' });
     }
 
-    const questionSnapshots = await generateSnapshots(organizationId, config);
-    if (questionSnapshots.length === 0) {
-      return res.status(400).json({ 
-        success: false, 
-        error: `Insufficient approved questions found for ${config.subject} (${config.examType}).` 
-      });
-    }
-
+    // Check existing attempts
     const existingAttempts = await Exam.find({ 
       sessionId: session._id, 
       userId, 
       organizationId 
     });
 
-    const activeAttempt = existingAttempts.find(exp => exp.status === 'active');
-    
+    let activeAttempt = existingAttempts.find(exp => exp.status === 'active');
+
     if (activeAttempt) {
-      if (activeAttempt.expiresAt && new Date() >= new Date(activeAttempt.expiresAt)) {
-        activeAttempt.status = 'expired';
+      if (activeAttempt.endTime && new Date() >= new Date(activeAttempt.endTime)) {
+        activeAttempt.status = 'timed-out';
         await activeAttempt.save();
-        return res.status(403).json({ success: false, error: 'Exam time expired while you were away.' });
+        return res.status(403).json({ success: false, error: 'Exam time expired.' });
       }
 
-      let activeList = getQuestionsList(activeAttempt);
-      if (activeList.length === 0) {
-        activeAttempt.questions = questionSnapshots;
-        activeAttempt.questionSnapshots = questionSnapshots;
-        activeAttempt.answers = questionSnapshots;
-        await activeAttempt.save();
-      }
+      // Self-heal active attempt if questionsServed is empty
+      activeAttempt = await repairExamQuestions(activeAttempt, organizationId);
+
+      const populatedAttempt = await Exam.findById(activeAttempt._id).populate('questionsServed');
 
       return res.status(200).json({
         success: true,
         message: 'Resuming active exam attempt',
         resumed: true,
-        data: activeAttempt
+        data: populatedAttempt
       });
     }
 
-    const completedAttempts = existingAttempts.filter(exp => ['submitted', 'expired'].includes(exp.status));
+    const completedAttempts = existingAttempts.filter(exp => ['submitted', 'timed-out'].includes(exp.status));
     if (completedAttempts.length >= (config.maxAttempts || 1)) {
-      return res.status(403).json({ success: false, error: 'Maximum allowed attempt limit reached for this exam.' });
+      return res.status(403).json({ success: false, error: 'Maximum allowed attempt limit reached.' });
     }
 
+    // Query questions to initialize new exam
+    const questions = await Question.find({
+      organizationId,
+      subject: config.subject,
+      examType: config.examType,
+      paperType: config.paperType || 'OBJ',
+      status: 'APPROVED'
+    }).limit(config.totalQuestions || 50);
+
+    if (questions.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: `No approved questions found for ${config.subject} (${config.examType}).` 
+      });
+    }
+
+    const questionIds = questions.map(q => q._id);
     const startTime = new Date();
     const durationMinutes = config.durationValue || 60;
-    const expiresAt = new Date(startTime.getTime() + durationMinutes * 60 * 1000);
+    const endTime = new Date(startTime.getTime() + durationMinutes * 60 * 1000);
+    const totalSecondsRemaining = durationMinutes * 60;
+
+    const initialResponses = questions.map(q => ({
+      questionId: q._id,
+      selectedOptionKey: null,
+      isMarkedForReview: false,
+      subject: q.subject || config.subject,
+      secondsSpentOnQuestion: 0,
+      timestamp: new Date()
+    }));
 
     const attempt = await Exam.create({
       organizationId,
       userId,
       sessionId: session._id,
       examConfigId: config._id,
-      questions: questionSnapshots,
-      questionSnapshots: questionSnapshots,
-      answers: questionSnapshots,
+      paperType: config.paperType || 'OBJ',
+      status: 'active',
+      questionsServed: questionIds,
+      responses: initialResponses,
+      currentSubject: config.subject,
       startTime,
-      expiresAt,
-      status: 'active'
+      endTime,
+      totalSecondsRemaining
     });
+
+    const populatedAttempt = await Exam.findById(attempt._id).populate('questionsServed');
 
     res.status(201).json({
       success: true,
       message: 'Exam started successfully',
       resumed: false,
-      data: attempt
+      data: populatedAttempt
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -153,9 +195,19 @@ exports.submitAnswer = async (req, res) => {
   try {
     const { organizationId, id: userId } = req.user;
     const { examId } = req.params;
-    const { questionId, selectedOption, isFlagged, secondsSpent } = req.body;
+    
+    // Accepts either standard schema properties or generic payload keys
+    const { 
+      questionId, 
+      selectedOption, 
+      selectedOptionKey, 
+      isFlagged, 
+      isMarkedForReview, 
+      secondsSpent, 
+      secondsSpentOnQuestion 
+    } = req.body;
 
-    const attempt = await Exam.findOne({ _id: examId, userId, organizationId });
+    let attempt = await Exam.findOne({ _id: examId, userId, organizationId });
 
     if (!attempt) {
       return res.status(404).json({ success: false, error: 'Exam attempt not found.' });
@@ -165,64 +217,59 @@ exports.submitAnswer = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Exam attempt is no longer active.' });
     }
 
-    if (attempt.expiresAt && new Date() > new Date(attempt.expiresAt)) {
-      attempt.status = 'expired';
+    if (attempt.endTime && new Date() > new Date(attempt.endTime)) {
+      attempt.status = 'timed-out';
       await attempt.save();
-      return res.status(403).json({ success: false, error: 'Time limit exceeded. Exam expired.' });
+      return res.status(403).json({ success: false, error: 'Time limit exceeded. Exam timed out.' });
     }
 
-    let questionsList = getQuestionsList(attempt);
+    // Auto-repair if questionsServed is empty on the current record
+    attempt = await repairExamQuestions(attempt, organizationId);
 
-    // Auto-repair if attempt record was created with empty questions
-    if (questionsList.length === 0) {
-      const session = await ExamSession.findOne({ _id: attempt.sessionId, organizationId }).populate('examConfigId');
-      if (session && session.examConfigId) {
-        const questionSnapshots = await generateSnapshots(organizationId, session.examConfigId);
-        attempt.questions = questionSnapshots;
-        attempt.questionSnapshots = questionSnapshots;
-        attempt.answers = questionSnapshots;
-        await attempt.save();
-        questionsList = getQuestionsList(attempt);
+    const finalOption = selectedOptionKey !== undefined ? selectedOptionKey : selectedOption;
+    const finalFlag = isMarkedForReview !== undefined ? isMarkedForReview : isFlagged;
+    const finalSeconds = secondsSpentOnQuestion !== undefined ? secondsSpentOnQuestion : secondsSpent;
+
+    const isServed = attempt.questionsServed.some(qId => qId.toString() === questionId);
+    if (!isServed) {
+      return res.status(404).json({ 
+        success: false, 
+        error: `Question ${questionId} is not in questionsServed for this exam attempt.` 
+      });
+    }
+
+    let respIndex = attempt.responses.findIndex(r => r.questionId.toString() === questionId);
+
+    if (respIndex === -1) {
+      attempt.responses.push({
+        questionId,
+        selectedOptionKey: finalOption || null,
+        isMarkedForReview: finalFlag || false,
+        secondsSpentOnQuestion: finalSeconds || 0,
+        timestamp: new Date()
+      });
+      respIndex = attempt.responses.length - 1;
+    } else {
+      if (finalOption !== undefined) {
+        attempt.responses[respIndex].selectedOptionKey = finalOption;
       }
+      if (finalFlag !== undefined) {
+        attempt.responses[respIndex].isMarkedForReview = finalFlag;
+      }
+      if (finalSeconds) {
+        attempt.responses[respIndex].secondsSpentOnQuestion = 
+          (attempt.responses[respIndex].secondsSpentOnQuestion || 0) + finalSeconds;
+      }
+      attempt.responses[respIndex].timestamp = new Date();
     }
 
-    if (questionsList.length === 0) {
-      return res.status(400).json({ success: false, error: 'No questions registered for this exam attempt.' });
-    }
-
-    const qIndex = questionsList.findIndex(q => {
-      const targetId = q.questionId || q._id;
-      return targetId && targetId.toString() === questionId;
-    });
-
-    if (qIndex === -1) {
-      return res.status(404).json({ success: false, error: 'Question not found in this exam attempt.' });
-    }
-
-    if (selectedOption !== undefined) {
-      questionsList[qIndex].selectedOption = selectedOption;
-    }
-    if (isFlagged !== undefined) {
-      questionsList[qIndex].isFlagged = isFlagged;
-    }
-    if (secondsSpent) {
-      questionsList[qIndex].secondsSpent = (questionsList[qIndex].secondsSpent || 0) + secondsSpent;
-    }
-
-    attempt.markModified('questions');
-    attempt.markModified('questionSnapshots');
-    attempt.markModified('answers');
-
+    attempt.markModified('responses');
     await attempt.save();
 
-    res.status(200).json({ 
-      success: true, 
+    res.status(200).json({
+      success: true,
       message: 'Response synced successfully',
-      data: {
-        questionId,
-        selectedOption: questionsList[qIndex].selectedOption,
-        isFlagged: questionsList[qIndex].isFlagged
-      }
+      data: attempt.responses[respIndex]
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -238,8 +285,7 @@ exports.submitExam = async (req, res) => {
     const { organizationId, id: userId } = req.user;
     const { examId } = req.params;
 
-    const attempt = await Exam.findOne({ _id: examId, userId, organizationId })
-      .populate('examConfigId');
+    let attempt = await Exam.findOne({ _id: examId, userId, organizationId });
 
     if (!attempt) {
       return res.status(404).json({ success: false, error: 'Exam attempt not found.' });
@@ -249,56 +295,37 @@ exports.submitExam = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Exam has already been submitted.' });
     }
 
-    let questionsList = getQuestionsList(attempt);
-    if (questionsList.length === 0 && attempt.sessionId) {
-      const session = await ExamSession.findOne({ _id: attempt.sessionId, organizationId }).populate('examConfigId');
-      if (session && session.examConfigId) {
-        const questionSnapshots = await generateSnapshots(organizationId, session.examConfigId);
-        attempt.questions = questionSnapshots;
-        attempt.questionSnapshots = questionSnapshots;
-        attempt.answers = questionSnapshots;
-        await attempt.save();
-        questionsList = getQuestionsList(attempt);
-      }
-    }
+    attempt = await repairExamQuestions(attempt, organizationId);
 
-    const questionIds = questionsList.map(q => q.questionId || q._id);
-    const masterQuestions = await Question.find({ _id: { $in: questionIds } });
+    const masterQuestions = await Question.find({ _id: { $in: attempt.questionsServed } });
     const questionMap = new Map(masterQuestions.map(q => [q._id.toString(), q]));
 
     let totalScore = 0;
-    let totalCorrect = 0;
-    let totalWrong = 0;
-    let totalUnanswered = 0;
+    let maxPossibleScore = 0;
 
-    questionsList.forEach(snapshot => {
-      const qId = snapshot.questionId || snapshot._id;
-      const originalQuestion = questionMap.get(qId ? qId.toString() : '');
-
-      if (!snapshot.selectedOption) {
-        totalUnanswered++;
-      } else if (originalQuestion && snapshot.selectedOption === originalQuestion.correctOptionKey) {
-        totalCorrect++;
-        totalScore += (originalQuestion.marks || 1);
-      } else {
-        totalWrong++;
+    attempt.responses.forEach(resp => {
+      const q = questionMap.get(resp.questionId.toString());
+      if (q) {
+        const marks = q.marks || 1;
+        maxPossibleScore += marks;
+        if (resp.selectedOptionKey && resp.selectedOptionKey === q.correctOptionKey) {
+          resp.isCorrect = true;
+          totalScore += marks;
+        } else {
+          resp.isCorrect = false;
+        }
       }
     });
 
-    const totalQuestions = questionsList.length;
-    const percentage = totalQuestions > 0 ? parseFloat(((totalCorrect / totalQuestions) * 100).toFixed(2)) : 0;
+    const percentage = maxPossibleScore > 0 ? parseFloat(((totalScore / maxPossibleScore) * 100).toFixed(2)) : 0;
 
     attempt.status = 'submitted';
     attempt.submittedAt = new Date();
-    attempt.score = totalScore;
-    attempt.metrics = {
-      totalQuestions,
-      totalCorrect,
-      totalWrong,
-      totalUnanswered,
-      percentage
-    };
+    attempt.totalScore = totalScore;
+    attempt.maxPossibleScore = maxPossibleScore;
+    attempt.percentage = percentage;
 
+    attempt.markModified('responses');
     await attempt.save();
 
     res.status(200).json({
@@ -308,8 +335,9 @@ exports.submitExam = async (req, res) => {
         examId: attempt._id,
         status: attempt.status,
         submittedAt: attempt.submittedAt,
-        score: attempt.score,
-        metrics: attempt.metrics
+        totalScore: attempt.totalScore,
+        maxPossibleScore: attempt.maxPossibleScore,
+        percentage: attempt.percentage
       }
     });
   } catch (error) {
@@ -324,14 +352,19 @@ exports.submitExam = async (req, res) => {
 exports.getExamById = async (req, res) => {
   try {
     const { organizationId, id: userId } = req.user;
-    const attempt = await Exam.findOne({ _id: req.params.examId, userId, organizationId })
-      .populate('examConfigId', 'title subject examType paperType durationValue');
+    let attempt = await Exam.findOne({ _id: req.params.examId, userId, organizationId });
 
     if (!attempt) {
       return res.status(404).json({ success: false, error: 'Exam attempt not found.' });
     }
 
-    res.status(200).json({ success: true, data: attempt });
+    attempt = await repairExamQuestions(attempt, organizationId);
+
+    const populated = await Exam.findById(attempt._id)
+      .populate('examConfigId', 'title subject examType paperType durationValue')
+      .populate('questionsServed');
+
+    res.status(200).json({ success: true, data: populated });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
