@@ -5,27 +5,44 @@ const auth = require('../middleware/auth');
 const authorize = require('../middleware/rbac');
 const tenantContext = require('../middleware/tenantContext');
 
+const examConfigController = require('../controllers/examConfigController');
+
 router.use(auth);
 router.use(tenantContext);
 
-// List all cohorts/groups in organization
-router.get('/', authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER', 'INSTRUCTOR'), (req, res) => {
-  res.status(200).json({ message: 'Get cohorts endpoint active' });
-});
+// Get all exam blueprints
+router.get(
+  '/',
+  authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER', 'INSTRUCTOR'),
+  examConfigController.getExamConfigs
+);
 
-// Create new cohort
-router.post('/', authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER'), (req, res) => {
-  res.status(200).json({ message: 'Create cohort endpoint active' });
-});
+// Create new exam blueprint
+router.post(
+  '/',
+  authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER', 'INSTRUCTOR'),
+  examConfigController.createExamConfig
+);
 
-// Get cohort by ID
-router.get('/:id', authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER', 'INSTRUCTOR'), (req, res) => {
-  res.status(200).json({ message: 'Get cohort details endpoint active' });
-});
+// Get single blueprint details
+router.get(
+  '/:id',
+  authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER', 'INSTRUCTOR'),
+  examConfigController.getExamConfigById
+);
 
-// Delete cohort
-router.delete('/:id', authorize('SUPER_ADMIN', 'ORG_ADMIN'), (req, res) => {
-  res.status(200).json({ message: 'Delete cohort endpoint active' });
-});
+// Update blueprint
+router.put(
+  '/:id',
+  authorize('SUPER_ADMIN', 'ORG_ADMIN', 'EXAM_OFFICER'),
+  examConfigController.updateExamConfig
+);
+
+// Delete blueprint
+router.delete(
+  '/:id',
+  authorize('SUPER_ADMIN', 'ORG_ADMIN'),
+  examConfigController.deleteExamConfig
+);
 
 module.exports = router;
