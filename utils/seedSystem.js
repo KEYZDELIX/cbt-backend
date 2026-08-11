@@ -4,14 +4,18 @@ const User = require('../models/User');
 
 async function seedSystem() {
   try {
-    // 1. Ensure Host Organization Exists and is Active
+    // 1. Force-activate ALL existing organizations in MongoDB
+    await Organization.updateMany({}, { $set: { status: "ACTIVE", isActive: true } });
+    console.log("✅ All organizations set to ACTIVE");
+
+    // 2. Ensure Host Organization Exists
     let hostOrg = await Organization.findOne({ isHost: true });
     if (!hostOrg) {
       hostOrg = await Organization.create({
         name: "Savvy Scholars Tutors",
         code: "SST",
         isHost: true,
-        status: "ACTIVE", // <-- Set active status
+        status: "ACTIVE",
         isActive: true,
         contactInfo: { 
           email: "savvyscholarstutors@gmail.com", 
@@ -27,15 +31,9 @@ async function seedSystem() {
         }
       });
       console.log("✅ Host Organization initialized:", hostOrg.name);
-    } else if (hostOrg.status !== "ACTIVE" || !hostOrg.isActive) {
-      // Auto-heal existing host org if status is missing or inactive
-      hostOrg.status = "ACTIVE";
-      hostOrg.isActive = true;
-      await hostOrg.save();
-      console.log("✅ Host Organization status updated to ACTIVE");
     }
 
-    // 2. Ensure System Admin User Exists
+    // 3. Ensure System Admin User Exists
     let systemUser = await User.findOne({ email: "savvyscholarstutors@gmail.com" });
     if (!systemUser) {
       const defaultPassword = process.env.SUPER_ADMIN_PASSWORD || "AdminPass123!";
@@ -46,7 +44,7 @@ async function seedSystem() {
         firstName: "System",
         lastName: "Administrator",
         email: "savvyscholarstutors@gmail.com",
-        gender: "Male",
+        gender: "MALE",
         phone: "+2349063771245",
         regNo: "SYS-001",
         password: hashedPassword,
