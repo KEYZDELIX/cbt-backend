@@ -28,24 +28,28 @@ async function seedSystem() {
     }
 
     // 2. Ensure System Admin User Exists
-let systemUser = await User.findOne({ email: "savvyscholarstutors@gmail.com" });
-if (!systemUser) {
-  const defaultPassword = process.env.SUPER_ADMIN_PASSWORD || "AdminPass123!";
-  const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+    let systemUser = await User.findOne({ email: "savvyscholarstutors@gmail.com" });
+    if (!systemUser) {
+      const defaultPassword = process.env.SUPER_ADMIN_PASSWORD || "AdminPass123!";
+      const hashedPassword = await bcrypt.hash(defaultPassword, 10);
 
-  systemUser = await User.create({
-    organizationId: hostOrg._id,
-    firstName: "System",
-    lastName: "Administrator",
-    email: "savvyscholarstutors@gmail.com",
-    gender: "MALE", // <-- Added required gender field (e.g., MALE, FEMALE, or OTHER)
-    phone: "+2349063771245",
-    regNo: "SYS-001",
-    password: hashedPassword,
-    role: "SUPER_ADMIN",
-    status: "ACTIVE"
-  });
-  console.log("✅ System Admin User initialized:", systemUser.email);
+      systemUser = await User.create({
+        organizationId: hostOrg._id,
+        firstName: "System",
+        lastName: "Administrator",
+        email: "savvyscholarstutors@gmail.com",
+        gender: "MALE",
+        phone: "+2349063771245",
+        regNo: "SYS-001",
+        password: hashedPassword,
+        role: "SUPER_ADMIN",
+        status: "ACTIVE"
+      });
+      console.log("✅ System Admin User initialized:", systemUser.email);
+    }
+  } catch (error) {
+    console.error("❌ System seeding failed:", error.message);
+  }
 }
 
 module.exports = seedSystem;
